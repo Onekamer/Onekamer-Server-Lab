@@ -779,6 +779,7 @@ app.post("/send-notification", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+console.log("✅ Route OneSignal /send-notification chargée");
 
 // ============================================================
 // 6️⃣ Route de santé (Render health check)
