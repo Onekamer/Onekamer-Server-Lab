@@ -98,9 +98,10 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
     if (folder === "rencontres") {
       try {
+        // ✅ Correction ici : sauvegarde dans le sous-dossier 'rencontres/' de Supabase
         const { error: supabaseError } = await supabase.storage
           .from("rencontres")
-          .upload(fileName, file.buffer, {
+          .upload(uploadPath, file.buffer, {
             contentType: mimeType,
             upsert: true,
           });
@@ -108,7 +109,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
         if (supabaseError) {
           console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
         } else {
-          console.log("✅ Fichier aussi ajouté dans Supabase bucket 'rencontres'");
+          console.log("✅ Fichier aussi ajouté dans Supabase bucket 'rencontres/rencontres'");
         }
       } catch (syncErr) {
         console.warn("⚠️ Erreur de synchronisation Supabase :", syncErr.message);
