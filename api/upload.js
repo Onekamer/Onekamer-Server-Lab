@@ -16,23 +16,11 @@ const supabase = createClient(
 router.post("/upload", upload.single("file"), async (req, res) => {
   try {
     // ✅ Compatibilité étendue avec anciens et nouveaux champs
-    const folder =
-      req.body.folder?.trim() ||
-      req.body.type?.trim() ||
-      (req.originalUrl.includes("rencontre") ? "rencontres" : "misc");
-
+    const folder = req.body.folder || req.body.type || "misc";
     const userId = req.body.userId || req.body.recordId;
     const file = req.file;
 
-    // 🔍 LOG DEBUG — très utile dans Render
-    console.log("📤 [UPLOAD DEBUG]");
-    console.log(" → Folder reçu:", folder);
-    console.log(" → userId:", userId);
-    console.log(" → Nom original:", file?.originalname);
-    console.log(" → MimeType:", file?.mimetype);
-
     if (!file) {
-      console.error("⛔ Aucun fichier reçu.");
       return res.status(400).json({ error: "Aucun fichier reçu." });
     }
 
@@ -50,9 +38,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       "faits_divers",
       "rencontres",
     ];
-
     if (!allowedFolders.includes(folder)) {
-      console.warn("⚠️ Dossier non autorisé:", folder);
       return res.status(400).json({ error: `Dossier non autorisé: ${folder}` });
     }
 
@@ -74,7 +60,6 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     const isAudio = ALLOWED_AUDIO_TYPES.includes(mimeType);
 
     if (!isImage && !isVideo && !isAudio) {
-      console.error("⛔ Type non pris en charge:", mimeType);
       return res.status(400).json({
         success: false,
         message: `Type de fichier non pris en charge (${mimeType}).`,
@@ -109,12 +94,10 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
     // 🌍 URL finale (CDN public)
     const cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
-    console.log("✅ Upload Bunny réussi:", cdnUrl);
 
     // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
     if (folder === "rencontres") {
       try {
-        console.log("🔄 Synchronisation Supabase → bucket 'rencontres'...");
         const { error: supabaseError } = await supabase.storage
           .from("rencontres")
           .upload(fileName, file.buffer, {
