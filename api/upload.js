@@ -114,10 +114,21 @@ console.log(`
    // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
 if (folder === "rencontres") {
   try {
-    // ✅ Chemin exact : rencontres/<uuid>/<fichier>
+    // ✅ Structure finale dans Supabase :
+    // Bucket: rencontres
+    // Dossier: rencontres/<uuid>/<fichier>
     const supabasePath = userId
       ? `${folder}/${userId}/${fileName}`
       : `${folder}/${fileName}`;
+
+    console.log(`
+🧩 Synchronisation Supabase en cours...
+📦 Bucket: rencontres
+📁 Dossier: ${folder}
+👤 Utilisateur: ${userId || "inconnu"}
+📸 Fichier: ${fileName}
+➡️  Chemin complet: ${supabasePath}
+    `);
 
     const { error: supabaseError } = await supabase.storage
       .from("rencontres")
@@ -127,15 +138,13 @@ if (folder === "rencontres") {
       });
 
     if (supabaseError) {
-      console.warn(
-        "⚠️ Upload Bunny réussi, mais échec Supabase :",
-        supabaseError.message
-      );
+      console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
     } else {
       console.log(`
-✅ Fichier aussi ajouté dans Supabase
+✅ Fichier aussi ajouté dans Supabase !
 📦 Bucket: rencontres
 📁 Chemin interne: ${supabasePath}
+📤 Upload terminé avec succès 🚀
       `);
     }
   } catch (syncErr) {
