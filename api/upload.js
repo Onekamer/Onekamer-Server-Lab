@@ -111,11 +111,13 @@ console.log(`
     // 🌍 URL finale (CDN public)
     const cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
 
-    // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
+   // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
 if (folder === "rencontres") {
   try {
-    // ✅ Sauvegarde dans le sous-dossier utilisateur (comme sur Bunny)
-    const supabasePath = userId ? `${userId}/${fileName}` : fileName;
+    // ✅ Chemin exact : rencontres/<uuid>/<fichier>
+    const supabasePath = userId
+      ? `${folder}/${userId}/${fileName}`
+      : `${folder}/${fileName}`;
 
     const { error: supabaseError } = await supabase.storage
       .from("rencontres")
@@ -125,12 +127,15 @@ if (folder === "rencontres") {
       });
 
     if (supabaseError) {
-      console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
+      console.warn(
+        "⚠️ Upload Bunny réussi, mais échec Supabase :",
+        supabaseError.message
+      );
     } else {
       console.log(`
 ✅ Fichier aussi ajouté dans Supabase
 📦 Bucket: rencontres
-📁 Chemin: ${supabasePath}
+📁 Chemin interne: ${supabasePath}
       `);
     }
   } catch (syncErr) {
