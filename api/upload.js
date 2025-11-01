@@ -17,7 +17,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
   try {
     // ✅ Compatibilité étendue avec anciens et nouveaux champs
     const folder = req.body.folder || req.body.type || "misc";
-    const userId = req.body.userId || req.body.recordId;
+    const userId = req.body.user_id || req.body.userId || req.body.recordId;
     const file = req.file;
 
     if (!file) {
