@@ -112,25 +112,31 @@ console.log(`
     const cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
 
     // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
-    if (folder === "rencontres") {
-      try {
-        // ✅ Correction ici : sauvegarde dans le sous-dossier 'rencontres/' de Supabase
-        const { error: supabaseError } = await supabase.storage
-          .from("rencontres")
-          .upload(uploadPath, file.buffer, {
-            contentType: mimeType,
-            upsert: true,
-          });
+if (folder === "rencontres") {
+  try {
+    // ✅ Sauvegarde dans le sous-dossier utilisateur (comme sur Bunny)
+    const supabasePath = userId ? `${userId}/${fileName}` : fileName;
 
-        if (supabaseError) {
-          console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
-        } else {
-          console.log("✅ Fichier aussi ajouté dans Supabase bucket 'rencontres/rencontres'");
-        }
-      } catch (syncErr) {
-        console.warn("⚠️ Erreur de synchronisation Supabase :", syncErr.message);
-      }
+    const { error: supabaseError } = await supabase.storage
+      .from("rencontres")
+      .upload(supabasePath, file.buffer, {
+        contentType: mimeType,
+        upsert: true,
+      });
+
+    if (supabaseError) {
+      console.warn("⚠️ Upload Bunny réussi, mais échec Supabase :", supabaseError.message);
+    } else {
+      console.log(`
+✅ Fichier aussi ajouté dans Supabase
+📦 Bucket: rencontres
+📁 Chemin: ${supabasePath}
+      `);
     }
+  } catch (syncErr) {
+    console.warn("⚠️ Erreur de synchronisation Supabase :", syncErr.message);
+  }
+}
 
     // ✅ Succès
     return res.status(200).json({
