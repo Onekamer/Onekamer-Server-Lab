@@ -67,11 +67,18 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     // 🔧 Nom de fichier sûr et unique
-    const originalName = file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`;
-    const fileName = `${Date.now()}_${originalName}`;
-    const uploadPath = `${folder}/${userId ? `${userId}_` : ""}${fileName}`;
+const originalName = file.originalname?.replace(/\s+/g, "_") || `upload.${ext}`;
+const fileName = `${Date.now()}_${originalName}`;
 
-    console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType);
+// ✅ Correction : crée un sous-dossier par utilisateur pour les fichiers de rencontre
+let uploadPath;
+if (folder === "rencontres" && userId) {
+  uploadPath = `${folder}/${userId}/${fileName}`;
+} else {
+  uploadPath = `${folder}/${fileName}`;
+}
+
+console.log("📁 Upload vers:", uploadPath, "| Type:", mimeType);
 
     // 🚀 Upload vers BunnyCDN
     const response = await fetch(
