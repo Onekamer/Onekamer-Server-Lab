@@ -2,6 +2,10 @@ import express from "express";
 import multer from "multer";
 import mime from "mime-types";
 import { createClient } from "@supabase/supabase-js";
+import fixAnnoncesImages from "./fix-annonces-images.js";
+import fixPartenaireImages from "./fix-partenaire-images.js";
+import fixEvenementsImages from "./fix-evenements-images.js";
+
 
 const router = express.Router();
 const upload = multer();
@@ -161,24 +165,22 @@ if (folder === "rencontres") {
       message: `✅ Upload réussi vers ${cdnUrl}`,
     });
     
-   // 🚀 Lancer le correctif d'images en arrière-plan (fire-and-forget)
-const folderForFix = (req.body.folder || req.body.type || "").toLowerCase();
-let fixUrl = null;
-if (folderForFix.startsWith("annonce")) fixUrl = "https://onekamer-server.onrender.com/api/fix-annonces-images";
-if (folderForFix.startsWith("evenement")) fixUrl = "https://onekamer-server.onrender.com/api/fix-evenements-images";
-if (folderForFix.startsWith("partenaire")) fixUrl = "https://onekamer-server.onrender.com/api/fix-partenaire-images";
+ // 🚀 Lancer le correctif localement sans HTTP
+try {
+  const folder = (req.body.folder || req.body.type || "").toLowerCase();
 
-if (fixUrl) {
-  // Petit délai pour laisser Supabase/transactions respirer
-  setTimeout(() => {
-    console.log(`🧩 Auto-fix déclenché pour "${folderForFix}" → ${fixUrl}`);
-    fetch(fixUrl)
-      .then(r => r.text())
-      .then(txt => console.log("✅ Auto-fix OK:", txt))
-      .catch(err => console.warn("⚠️ Auto-fix erreur:", err?.message || err));
-  }, 1200);
-} else {
-  console.log(`ℹ️ Pas d'auto-fix pour folder="${folderForFix}"`);
+  if (folder.startsWith("annonce")) {
+    console.log("🧩 Lancement local du fix annonces...");
+    await fixAnnoncesImages.runFix(); // <-- nouvelle méthode exportée
+  } else if (folder.startsWith("evenement")) {
+    console.log("🧩 Lancement local du fix événements...");
+    await fixEvenementsImages.runFix();
+  } else if (folder.startsWith("partenaire")) {
+    console.log("🧩 Lancement local du fix partenaires...");
+    await fixPartenaireImages.runFix();
+  }
+} catch (err) {
+  console.warn("⚠️ Auto-fix local échoué:", err.message);
 }
     
   } catch (err) {
