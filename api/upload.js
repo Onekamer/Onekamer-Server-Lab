@@ -160,6 +160,29 @@ if (folder === "rencontres") {
       mimeType,
       message: `✅ Upload réussi vers ${cdnUrl}`,
     });
+    // 🚀 Lancer le correctif d'images juste après l'upload
+try {
+  const folder = req.body.folder || "annonces"; // ou selon ton champ
+  let fixUrl;
+
+  if (folder === "annonces") {
+    fixUrl = "https://onekamer-server.onrender.com/api/fix-annonces-images";
+  } else if (folder === "evenements") {
+    fixUrl = "https://onekamer-server.onrender.com/api/fix-evenements-images";
+  } else if (folder === "partenaires") {
+    fixUrl = "https://onekamer-server.onrender.com/api/fix-partenaire-images";
+  }
+
+  if (fixUrl) {
+    fetch(fixUrl)
+      .then(r => r.text())
+      .then(txt => console.log(`✅ Auto-fix exécuté pour ${folder}:`, txt))
+      .catch(err => console.warn("⚠️ Erreur auto-fix:", err.message));
+  }
+} catch (e) {
+  console.warn("⚠️ Impossible d’exécuter auto-fix:", e.message);
+}
+    
   } catch (err) {
     console.error("❌ Erreur upload:", err.message);
     return res.status(500).json({
