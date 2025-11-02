@@ -157,7 +157,7 @@ if (folder === "rencontres") {
 }
 
    // ✅ Succès — normalisation finale des URLs
-let cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
 
 // 🧩 Sécurité : forcer https complet, corriger éventuels doubles slashs
 cdnUrl = cdnUrl.replace(/([^:]\/)\/+/g, "$1");
