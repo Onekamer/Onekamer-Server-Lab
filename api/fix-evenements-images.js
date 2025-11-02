@@ -87,4 +87,71 @@ router.get("/fix-evenements-images", async (req, res) => {
   }
 });
 
+// ✅ Fonction réutilisable pour appel local (depuis upload.js)
+export async function runFix() {
+  console.log("🧩 Exécution du fix événements (appel local)...");
+  try {
+    // 1️⃣ Récupération de tous les types d'événements
+    const { data: types, error: typesError } = await supabase
+      .from("evenements_types")
+      .select("id, nom");
+
+    if (typesError) throw typesError;
+    if (!types?.length) {
+      console.log("⚠️ Aucun type d'événement trouvé pour fix-evenements.");
+      return;
+    }
+
+    // 2️⃣ Mapping type → image BunnyCDN
+    const CDN_BASE = "https://onekamer-media-cdn.b-cdn.net/evenements/";
+    const defaultImages = {};
+    for (const type of types) {
+      const slug = slugify(type.nom);
+      defaultImages[type.nom] = `${CDN_BASE}default_evenements_${slug}.png`;
+    }
+
+    // 3️⃣ Récupération des événements sans image
+    const { data: evenements, error: evError } = await supabase
+      .from("evenements")
+      .select(`
+        id,
+        media_url,
+        type_id,
+        evenements_types:type_id(nom)
+      `)
+      .or("media_url.is.null,media_url.eq.\"\"");
+
+    if (evError) throw evError;
+    if (!evenements?.length) {
+      console.log("⚙️ Aucun événement à corriger.");
+      return;
+    }
+
+    // 4️⃣ Mise à jour des événements sans image
+    let updated = 0;
+    for (const event of evenements) {
+      const typeNom = event.evenements_types?.nom?.trim();
+      if (!typeNom) continue;
+
+      let defaultImage =
+        defaultImages[typeNom] || `${CDN_BASE}default_evenements_autres.png`;
+
+      if (typeNom.toLowerCase().includes("table ronde")) {
+        defaultImage = `${CDN_BASE}default_evenements_table_ronde.png`;
+      }
+
+      const { error: updateError } = await supabase
+        .from("evenements")
+        .update({ media_url: defaultImage })
+        .eq("id", event.id);
+
+      if (!updateError) updated++;
+    }
+
+    console.log(`✅ ${updated} événements mis à jour avec images par défaut.`);
+  } catch (err) {
+    console.error("❌ Erreur runFix événements:", err.message);
+  }
+}
+
 export default router;
