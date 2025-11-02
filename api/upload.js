@@ -156,15 +156,33 @@ if (folder === "rencontres") {
   }
 }
 
-    // ✅ Succès
-    return res.status(200).json({
-      success: true,
-      url: cdnUrl,
-      path: uploadPath,
-      mimeType,
-      message: `✅ Upload réussi vers ${cdnUrl}`,
-    });
-    
+   // ✅ Succès — normalisation finale des URLs
+let cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+
+// 🧩 Sécurité : forcer https complet, corriger éventuels doubles slashs
+cdnUrl = cdnUrl.replace(/([^:]\/)\/+/g, "$1");
+
+// 🧩 Fallback : si BUNNY_CDN_URL n’est pas défini, basculer sur ton domaine Hostinger
+if (!process.env.BUNNY_CDN_URL || !cdnUrl.startsWith("http")) {
+  cdnUrl = `https://onekamer-media-cdn.b-cdn.net/${uploadPath}`;
+}
+
+// 📦 Log clair
+console.log(`
+✅ Upload finalisé :
+🌍 URL publique : ${cdnUrl}
+📁 Dossier interne : ${uploadPath}
+`);
+
+return res.status(200).json({
+  success: true,
+  url: cdnUrl,          // 👈 toujours l'URL complète
+  full_url: cdnUrl,     // 👈 alias pour compatibilité ancienne
+  path: uploadPath,     // 👈 utile pour debug uniquement
+  mimeType,
+  message: `✅ Upload réussi vers ${cdnUrl}`,
+});
+  
  // 🚀 Lancer le correctif localement sans HTTP
 try {
   const folder = (req.body.folder || req.body.type || "").toLowerCase();
