@@ -160,27 +160,25 @@ if (folder === "rencontres") {
       mimeType,
       message: `✅ Upload réussi vers ${cdnUrl}`,
     });
-    // 🚀 Lancer le correctif d'images juste après l'upload
-try {
-  const folder = req.body.folder || "annonces"; // ou selon ton champ
-  let fixUrl;
+    
+   // 🚀 Lancer le correctif d'images en arrière-plan (fire-and-forget)
+const folderForFix = (req.body.folder || req.body.type || "").toLowerCase();
+let fixUrl = null;
+if (folderForFix.startsWith("annonce")) fixUrl = "https://onekamer-server.onrender.com/api/fix-annonces-images";
+if (folderForFix.startsWith("evenement")) fixUrl = "https://onekamer-server.onrender.com/api/fix-evenements-images";
+if (folderForFix.startsWith("partenaire")) fixUrl = "https://onekamer-server.onrender.com/api/fix-partenaire-images";
 
-  if (folder === "annonces") {
-    fixUrl = "https://onekamer-server.onrender.com/api/fix-annonces-images";
-  } else if (folder === "evenements") {
-    fixUrl = "https://onekamer-server.onrender.com/api/fix-evenements-images";
-  } else if (folder === "partenaires") {
-    fixUrl = "https://onekamer-server.onrender.com/api/fix-partenaire-images";
-  }
-
-  if (fixUrl) {
+if (fixUrl) {
+  // Petit délai pour laisser Supabase/transactions respirer
+  setTimeout(() => {
+    console.log(`🧩 Auto-fix déclenché pour "${folderForFix}" → ${fixUrl}`);
     fetch(fixUrl)
       .then(r => r.text())
-      .then(txt => console.log(`✅ Auto-fix exécuté pour ${folder}:`, txt))
-      .catch(err => console.warn("⚠️ Erreur auto-fix:", err.message));
-  }
-} catch (e) {
-  console.warn("⚠️ Impossible d’exécuter auto-fix:", e.message);
+      .then(txt => console.log("✅ Auto-fix OK:", txt))
+      .catch(err => console.warn("⚠️ Auto-fix erreur:", err?.message || err));
+  }, 1200);
+} else {
+  console.log(`ℹ️ Pas d'auto-fix pour folder="${folderForFix}"`);
 }
     
   } catch (err) {
