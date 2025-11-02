@@ -83,4 +83,69 @@ router.get("/fix-annonces-images", async (req, res) => {
   }
 });
 
+// ✅ Fonction réutilisable pour appel local (depuis upload.js)
+export async function runFix() {
+  console.log("🧩 Exécution du fix annonces (appel local)...");
+  try {
+    // 1️⃣ Récupération de toutes les catégories
+    const { data: categories, error: catError } = await supabase
+      .from("annonces_categories")
+      .select("id, nom");
+
+    if (catError) throw catError;
+    if (!categories?.length) {
+      console.log("⚠️ Aucune catégorie trouvée pour fix-annonces.");
+      return;
+    }
+
+    // 2️⃣ Construction du mapping BunnyCDN
+    const CDN_BASE = "https://onekamer-media-cdn.b-cdn.net/annonces/";
+    const defaultImages = {};
+    for (const cat of categories) {
+      const slug = slugify(cat.nom);
+      defaultImages[cat.nom] = `${CDN_BASE}default_annonces_${slug}.png`;
+    }
+
+    // 3️⃣ Sélection des annonces sans image
+    const { data: annonces, error: annoncesError } = await supabase
+      .from("annonces")
+      .select(`
+        id,
+        media_url,
+        categorie_id,
+        annonces_categories:categorie_id(nom)
+      `)
+      .or("media_url.is.null,media_url.eq.\"\"");
+
+    if (annoncesError) throw annoncesError;
+    if (!annonces?.length) {
+      console.log("⚙️ Aucune annonce à corriger.");
+      return;
+    }
+
+    // 4️⃣ Mise à jour
+    let updated = 0;
+    for (const annonce of annonces) {
+      const categorieNom = annonce.annonces_categories?.nom?.trim();
+      if (!categorieNom) continue;
+
+      const defaultImage =
+        defaultImages[categorieNom] ||
+        `${CDN_BASE}default_annonces_autres.png`;
+
+      const { error: updateError } = await supabase
+        .from("annonces")
+        .update({ media_url: defaultImage })
+        .eq("id", annonce.id);
+
+      if (!updateError) updated++;
+    }
+
+    console.log(`✅ ${updated} annonces mises à jour avec images par défaut.`);
+  } catch (err) {
+    console.error("❌ Erreur runFix annonces:", err.message);
+  }
+}
+
+
 export default router;
