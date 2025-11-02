@@ -83,6 +83,70 @@ router.get("/fix-partenaire-images", async (req, res) => {
   }
 });
 
+// ✅ Fonction réutilisable pour appel local (depuis upload.js)
+export async function runFix() {
+  console.log("🧩 Exécution du fix partenaires (appel local)...");
+  try {
+    // 1️⃣ Récupération des catégories
+    const { data: categories, error: catError } = await supabase
+      .from("partenaires_categories")
+      .select("id, nom");
+
+    if (catError) throw catError;
+    if (!categories?.length) {
+      console.log("⚠️ Aucune catégorie trouvée pour fix-partenaires.");
+      return;
+    }
+
+    // 2️⃣ Construction du mapping BunnyCDN
+    const CDN_BASE = "https://onekamer-media-cdn.b-cdn.net/partenaires/";
+    const defaultImages = {};
+    for (const cat of categories) {
+      const slug = slugify(cat.nom);
+      defaultImages[cat.nom] = `${CDN_BASE}default_partenaires_${slug}.png`;
+    }
+
+    // 3️⃣ Récupération des partenaires sans image
+    const { data: partenaires, error: partenairesError } = await supabase
+      .from("partenaires")
+      .select(`
+        id,
+        media_url,
+        category_id,
+        partenaires_categories:category_id(nom)
+      `)
+      .or("media_url.is.null,media_url.eq.\"\"");
+
+    if (partenairesError) throw partenairesError;
+    if (!partenaires?.length) {
+      console.log("⚙️ Aucun partenaire à corriger.");
+      return;
+    }
+
+    // 4️⃣ Mise à jour
+    let updated = 0;
+    for (const partenaire of partenaires) {
+      const categorieNom = partenaire.partenaires_categories?.nom?.trim();
+      if (!categorieNom) continue;
+
+      const defaultImage =
+        defaultImages[categorieNom] ||
+        `${CDN_BASE}default_partenaires_autres.png`;
+
+      const { error: updateError } = await supabase
+        .from("partenaires")
+        .update({ media_url: defaultImage })
+        .eq("id", partenaire.id);
+
+      if (!updateError) updated++;
+    }
+
+    console.log(`✅ ${updated} partenaires mis à jour avec images par défaut.`);
+  } catch (err) {
+    console.error("❌ Erreur runFix partenaires:", err.message);
+  }
+}
+
 export default router;
 
 
