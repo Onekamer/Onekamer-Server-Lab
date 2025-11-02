@@ -799,6 +799,35 @@ app.post("/notifications/onesignal", (req, res, next) => {
 app.get("/", (req, res) => {
   res.send("✅ OneKamer backend est opérationnel !");
 });
+// ============================================================
+// 🔁 Auto-Fix Images (annonces, partenaires, événements)
+// ============================================================
+
+const FIX_URLS = [
+  "https://onekamer-server.onrender.com/api/fix-annonces-images",
+  "https://onekamer-server.onrender.com/api/fix-partenaire-images",
+  "https://onekamer-server.onrender.com/api/fix-evenements-images",
+];
+
+// ✅ Fonction d’appel automatique
+const runAutoFix = async () => {
+  console.log("🧩 Vérification automatique des images par défaut...");
+  for (const url of FIX_URLS) {
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      console.log(`✅ [AUTO-FIX] ${url} →`, text);
+    } catch (err) {
+      console.warn(`⚠️ Erreur auto-fix pour ${url}:`, err.message);
+    }
+  }
+};
+
+// 🚀 Lancer une première vérification au démarrage
+runAutoFix();
+
+// ⏱ Répéter toutes les 15 minutes (900 000 ms)
+setInterval(runAutoFix, 15 * 60 * 1000);
 
 // ============================================================
 // 7️⃣ Lancement serveur
