@@ -113,7 +113,7 @@ console.log(`
     }
 
     // 🌍 URL finale (CDN public)
-    const cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
+    let cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
 
    // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
 if (folder === "rencontres") {
