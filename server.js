@@ -3,7 +3,7 @@
 // ============================================================
 
 import * as dotenv from "dotenv";
-dotenv.config({ path: "./Onekamer-Server-Lab.env" });
+dotenv.config({ path: ".env.local" });
 
 import express from "express";
 import Stripe from "stripe";
