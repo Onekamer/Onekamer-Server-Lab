@@ -9,8 +9,8 @@
 import * as dotenv from "dotenv";
 dotenv.config(); // <-- chargera automatiquement le .env à la racine
 
-// Vérification visuelle
-console.log("📂 Fichier .env chargé depuis :", envPath);
+// Vérification visuelle (envPath supprimé pour éviter ReferenceError)
+console.log("📂 .env chargé");
 console.log("🔗 SUPABASE_URL =", process.env.SUPABASE_URL);
 
 import express from "express";
