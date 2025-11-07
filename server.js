@@ -2,8 +2,16 @@
 // OneKamer - Serveur Stripe + Supabase (OK COINS + Abonnements)
 // ============================================================
 
+// ============================================================
+// OneKamer - Serveur Stripe + Supabase (OK COINS + Abonnements)
+// ============================================================
+
 import * as dotenv from "dotenv";
-dotenv.config({ path: ".env.local" });
+dotenv.config(); // <-- chargera automatiquement le .env à la racine
+
+// Vérification visuelle
+console.log("📂 Fichier .env chargé depuis :", envPath);
+console.log("🔗 SUPABASE_URL =", process.env.SUPABASE_URL);
 
 import express from "express";
 import Stripe from "stripe";
@@ -31,13 +39,31 @@ const allowedOrigins = process.env.CORS_ORIGIN
       "https://onekamer-front-render.onrender.com", // Render (test/labo)
     ];
 
+// 🔧 Autorisations locales pour le développement/tests (sans ouvrir la prod)
+function isDevOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    const host = url.hostname;
+    const protoOk = url.protocol === "http:" || url.protocol === "https:";
+    if (!protoOk) return false;
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host.startsWith("192.168.") ||
+      host.startsWith("10.")
+    );
+  } catch (_e) {
+    return false;
+  }
+}
+
 app.use(
   cors({
     origin: function (origin, callback) {
       // Autorise les appels sans origin (ex: Postman, tests internes)
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(origin) || isDevOrigin(origin)) {
         callback(null, true);
       } else {
         console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
