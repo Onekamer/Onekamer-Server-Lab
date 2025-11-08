@@ -36,7 +36,8 @@ const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
   : [
       "https://onekamer.co",                        // Horizon (production)
-      "https://onekamer-front-render.onrender.com", // Render (test/labo)
+      "https://onekamer-front-render.onrender.com", // Render (ancien test/labo)
+      "https://onekamer-front-lab.onrender.com",    // Render (front lab actuel)
     ];
 
 // 🔧 Autorisations locales pour le développement/tests (sans ouvrir la prod)
