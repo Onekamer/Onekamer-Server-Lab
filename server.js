@@ -23,7 +23,9 @@ import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import notificationsRouter from "./api/notifications.js";
+import qrcodeRouter from "./api/qrcode.js";
 import webpush from "web-push";
+import cron from "node-cron";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -84,7 +86,7 @@ app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
 app.use("/api", notificationsRouter);
-
+app.use("/api", qrcodeRouter);
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
@@ -819,6 +821,43 @@ app.post("/create-checkout-session", async (req, res) => {
     res.status(500).json({ error: "Erreur serveur interne" });
   }
 });
+
+// ============================================================
+// Expiration automatique des QR Codes (horaire)
+// ============================================================
+try {
+  cron.schedule("0 * * * *", async () => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data: pastEvents, error: pastErr } = await supabase
+        .from("evenements")
+        .select("id")
+        .lt("date", today);
+      if (pastErr) {
+        await logEvent({ category: "qrcode", action: "expire.scan", status: "error", context: { error: pastErr.message } });
+        return;
+      }
+      const ids = Array.isArray(pastEvents) ? pastEvents.map((e) => e.id) : [];
+      if (ids.length === 0) {
+        await logEvent({ category: "qrcode", action: "expire.scan", status: "success", context: { updated: 0 } });
+        return;
+      }
+      const { data: updated, error: upErr } = await supabase
+        .from("event_qrcodes")
+        .update({ status: "expired" })
+        .in("event_id", ids)
+        .eq("status", "active")
+        .select("id");
+      if (upErr) {
+        await logEvent({ category: "qrcode", action: "expire.update", status: "error", context: { error: upErr.message } });
+      } else {
+        await logEvent({ category: "qrcode", action: "expire.update", status: "success", context: { updated: (updated?.length || 0) } });
+      }
+    } catch (e) {
+      await logEvent({ category: "qrcode", action: "expire.cron", status: "error", context: { error: e?.message || String(e) } });
+    }
+  });
+} catch {}
 
 // ============================================================
 // 3️⃣ Création de session Stripe - Abonnements
