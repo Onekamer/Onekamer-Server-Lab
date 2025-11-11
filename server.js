@@ -152,13 +152,11 @@ async function buildLivekitToken({ userId, roomName, isHost }) {
   });
   at.identity = userId;
   at.addGrant({
-    video: {
-      roomJoin: true,
-      room: roomName,
-      canPublish: !!isHost,
-      canSubscribe: true,
-      canPublishData: !!isHost,
-    },
+    roomJoin: true,
+    room: roomName,
+    canPublish: !!isHost,
+    canSubscribe: true,
+    canPublishData: !!isHost,
   });
   const jwt = await at.toJwt();
   return jwt;
