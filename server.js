@@ -26,6 +26,7 @@ import qrcodeRouter from "./api/qrcode.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import cron from "node-cron";
+import { AccessToken } from "@livekit/server-sdk";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -96,6 +97,59 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+// ============================================================
+// 🔧 Helpers LiveKit / Groupes
+// ============================================================
+
+function getLivekitUrl() {
+  return (
+    process.env.LIVEKIT_HOST_URL ||
+    process.env.LIVEKIT_URL ||
+    ""
+  );
+}
+
+async function isGroupAdminOrFounder(groupId, userId) {
+  try {
+    // Fondateur ?
+    const { data: grp } = await supabase
+      .from("groupes")
+      .select("fondateur_id")
+      .eq("id", groupId)
+      .maybeSingle();
+    if (grp?.fondateur_id === userId) return true;
+
+    // Admin déclaré ?
+    const { data: memb } = await supabase
+      .from("groupes_membres")
+      .select("is_admin")
+      .eq("groupe_id", groupId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    return !!memb?.is_admin;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function buildLivekitToken({ userId, roomName, isHost }) {
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!apiKey || !apiSecret) throw new Error("LIVEKIT_API_KEY/SECRET manquants");
+
+  const at = new AccessToken(apiKey, apiSecret, {
+    identity: userId,
+  });
+  at.addGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: !!isHost,
+    canSubscribe: true,
+    canPublishData: !!isHost,
+  });
+  return at.toJwt();
+}
 
 // ============================================================
 // 🔔 Web Push (VAPID) - Configuration si variables présentes
@@ -475,6 +529,137 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
       context: { event_type: event?.type, error: err?.message || err },
     });
     res.status(500).send("Erreur serveur interne");
+  }
+});
+
+// ============================================================
+// 🎥 LiveKit - Group Live Sessions (LAB)
+// ============================================================
+
+// GET statut live d'un groupe
+app.get("/api/groups/:groupId/live", async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    if (!groupId) return res.status(400).json({ error: "groupId requis" });
+
+    const { data, error } = await supabase
+      .from("group_live_sessions")
+      .select("id, group_id, host_user_id, room_name, is_live, started_at")
+      .eq("group_id", groupId)
+      .eq("is_live", true)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+
+    if (!data) return res.json({ isLive: false });
+    res.json({
+      isLive: true,
+      roomName: data.room_name,
+      hostUserId: data.host_user_id,
+      startedAt: data.started_at,
+    });
+  } catch (e) {
+    console.error("❌ GET /api/groups/:groupId/live:", e);
+    await logEvent({ category: "live", action: "status", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// POST démarrer un live (host/admin uniquement)
+app.post("/api/groups/:groupId/live/start", async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const { userId } = req.body || {};
+    if (!groupId || !userId) return res.status(400).json({ error: "groupId et userId requis" });
+
+    const isAllowed = await isGroupAdminOrFounder(groupId, userId);
+    if (!isAllowed) return res.status(403).json({ error: "Accès refusé" });
+
+    // Un seul live actif par groupe
+    const { data: existing } = await supabase
+      .from("group_live_sessions")
+      .select("id")
+      .eq("group_id", groupId)
+      .eq("is_live", true)
+      .maybeSingle();
+    if (existing) return res.status(409).json({ error: "Live déjà en cours" });
+
+    const roomName = `group_${groupId}_${Date.now()}`;
+    const { data: created, error } = await supabase
+      .from("group_live_sessions")
+      .insert({ group_id: groupId, host_user_id: userId, room_name: roomName, is_live: true })
+      .select("id, room_name")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+
+    await logEvent({ category: "live", action: "start", status: "success", userId, context: { groupId, roomName } });
+    res.json({ isLive: true, roomName: created.room_name });
+  } catch (e) {
+    console.error("❌ POST /api/groups/:groupId/live/start:", e);
+    await logEvent({ category: "live", action: "start", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// POST arrêter un live (host/admin uniquement)
+app.post("/api/groups/:groupId/live/stop", async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const { userId, reason } = req.body || {};
+    if (!groupId || !userId) return res.status(400).json({ error: "groupId et userId requis" });
+
+    const isAllowed = await isGroupAdminOrFounder(groupId, userId);
+    if (!isAllowed) return res.status(403).json({ error: "Accès refusé" });
+
+    const { data: active } = await supabase
+      .from("group_live_sessions")
+      .select("id")
+      .eq("group_id", groupId)
+      .eq("is_live", true)
+      .maybeSingle();
+    if (!active) return res.status(404).json({ error: "Aucune session active" });
+
+    const { error } = await supabase
+      .from("group_live_sessions")
+      .update({ is_live: false, ended_at: new Date().toISOString(), ended_reason: reason || "stopped" })
+      .eq("id", active.id);
+    if (error) throw new Error(error.message);
+
+    await logEvent({ category: "live", action: "stop", status: "success", userId, context: { groupId } });
+    res.json({ stopped: true });
+  } catch (e) {
+    console.error("❌ POST /api/groups/:groupId/live/stop:", e);
+    await logEvent({ category: "live", action: "stop", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// POST génération token LiveKit
+app.post("/api/livekit/token", async (req, res) => {
+  try {
+    const { userId, groupId, roomName: bodyRoom } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "userId requis" });
+
+    let roomName = bodyRoom;
+    if (!roomName && groupId) {
+      const { data: live } = await supabase
+        .from("group_live_sessions")
+        .select("room_name, host_user_id")
+        .eq("group_id", groupId)
+        .eq("is_live", true)
+        .maybeSingle();
+      roomName = live?.room_name || null;
+    }
+    if (!roomName) return res.status(400).json({ error: "roomName ou groupId requis" });
+
+    const isHost = groupId ? await isGroupAdminOrFounder(groupId, userId) : false;
+    const token = buildLivekitToken({ userId, roomName, isHost });
+    const hostUrl = getLivekitUrl();
+
+    res.json({ token, hostUrl, roomName, role: isHost ? "host" : "viewer" });
+  } catch (e) {
+    console.error("❌ POST /api/livekit/token:", e);
+    await logEvent({ category: "live", action: "token", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
   }
 });
 
