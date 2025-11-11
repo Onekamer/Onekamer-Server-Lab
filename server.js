@@ -565,7 +565,7 @@ app.get("/api/groups/:groupId/live", async (req, res) => {
 });
 
 // POST démarrer un live (host/admin uniquement)
-app.post("/api/groups/:groupId/live/start", async (req, res) => {
+app.post("/api/groups/:groupId/live/start", bodyParser.json(), async (req, res) => {
   try {
     const groupId = req.params.groupId;
     const { userId } = req.body || {};
@@ -601,7 +601,7 @@ app.post("/api/groups/:groupId/live/start", async (req, res) => {
 });
 
 // POST arrêter un live (host/admin uniquement)
-app.post("/api/groups/:groupId/live/stop", async (req, res) => {
+app.post("/api/groups/:groupId/live/stop", bodyParser.json(), async (req, res) => {
   try {
     const groupId = req.params.groupId;
     const { userId, reason } = req.body || {};
@@ -634,7 +634,7 @@ app.post("/api/groups/:groupId/live/stop", async (req, res) => {
 });
 
 // POST génération token LiveKit
-app.post("/api/livekit/token", async (req, res) => {
+app.post("/api/livekit/token", bodyParser.json(), async (req, res) => {
   try {
     const { userId, groupId, roomName: bodyRoom } = req.body || {};
     if (!userId) return res.status(400).json({ error: "userId requis" });
