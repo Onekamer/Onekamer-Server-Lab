@@ -26,7 +26,7 @@ import qrcodeRouter from "./api/qrcode.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import cron from "node-cron";
-import { AccessToken } from "@livekit/server-sdk";
+import { AccessToken } from "livekit-server-sdk";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
