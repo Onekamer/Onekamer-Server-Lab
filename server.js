@@ -22,7 +22,6 @@ import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
-import notificationsRouter from "./api/notifications.js";
 import qrcodeRouter from "./api/qrcode.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
@@ -87,7 +86,6 @@ app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
 app.use("/api", pushRouter);
-app.use("/api", notificationsRouter);
 app.use("/api", qrcodeRouter);
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
