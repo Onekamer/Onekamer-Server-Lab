@@ -26,7 +26,7 @@ import qrcodeRouter from "./api/qrcode.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import cron from "node-cron";
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, VideoGrant } from "livekit-server-sdk";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -139,22 +139,27 @@ async function isGroupAdminOrFounder(groupId, userId) {
   }
 }
 
-function buildLivekitToken({ userId, roomName, isHost }) {
+async function buildLivekitToken({ userId, roomName, isHost }) {
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   if (!apiKey || !apiSecret) throw new Error("LIVEKIT_API_KEY/SECRET manquants");
 
-  const at = new AccessToken(apiKey, apiSecret, {
-    identity: userId,
+  // API v2
+  const at = new AccessToken({
+    issuer: apiKey,
+    secret: apiSecret,
   });
-  at.addGrant({
+  at.identity = userId;
+  const grant = new VideoGrant({
     roomJoin: true,
     room: roomName,
     canPublish: !!isHost,
     canSubscribe: true,
     canPublishData: !!isHost,
   });
-  return at.toJwt();
+  at.addGrant(grant);
+  const jwt = await at.toJwt();
+  return jwt;
 }
 
 // ============================================================
@@ -665,7 +670,7 @@ app.post("/api/livekit/token", bodyParser.json(), async (req, res) => {
     if (!roomName) return res.status(400).json({ error: "roomName ou groupId requis" });
 
     const isHost = groupId ? await isGroupAdminOrFounder(groupId, userId) : false;
-    const token = buildLivekitToken({ userId, roomName, isHost });
+    const token = await buildLivekitToken({ userId, roomName, isHost });
     const hostUrl = getLivekitUrl();
 
     res.json({ token, hostUrl, roomName, role: isHost ? "host" : "viewer" });
