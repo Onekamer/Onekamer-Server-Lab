@@ -100,6 +100,162 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
+// ============================================================
+// Groupes — Demandes d’adhésion (LAB)
+// ============================================================
+
+// Créer une demande d’adhésion
+app.post("/groups/:groupId/join-request", bodyParser.json(), async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+  try {
+    const groupId = req.params.groupId;
+    const { requesterId } = req.body || {};
+    if (!isUUID(groupId) || !isUUID(requesterId)) return res.status(400).json({ error: "groupId et requesterId requis (uuid)" });
+
+    // Vérifier pending existante
+    const { data: existing } = await supabase
+      .from("group_join_requests")
+      .select("id, status")
+      .eq("group_id", groupId)
+      .eq("requester_id", requesterId)
+      .eq("status", "pending")
+      .maybeSingle();
+    if (existing) return res.json({ success: true, note: "already_pending" });
+
+    // Créer demande
+    const { data: ins, error: insErr } = await supabase
+      .from("group_join_requests")
+      .insert({ group_id: groupId, requester_id: requesterId })
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message });
+
+    // Récup fondateur
+    const { data: grp } = await supabase
+      .from("groupes")
+      .select("fondateur_id, nom")
+      .eq("id", groupId)
+      .maybeSingle();
+
+    // Notifier fondateur
+    if (grp?.fondateur_id) {
+      await notifyUsersNative({
+        targetUserIds: [grp.fondateur_id],
+        title: "Demande d’adhésion",
+        message: `Une nouvelle demande pour rejoindre ${grp?.nom || "votre groupe"}`,
+        url: `/groupes/${groupId}?tab=demandes`,
+        data: { type: "group_join_request", groupId, requestId: ins?.id },
+      });
+    }
+
+    await logEvent({ category: "groups", action: "join.request", status: "success", userId: requesterId, context: { groupId, requestId: ins?.id } });
+    res.json({ success: true, requestId: ins?.id });
+  } catch (e) {
+    console.error("❌ /groups/:groupId/join-request:", e);
+    await logEvent({ category: "groups", action: "join.request", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Approuver une demande
+app.post("/groups/requests/:requestId/approve", bodyParser.json(), async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+  try {
+    const requestId = req.params.requestId;
+    const { actorId } = req.body || {};
+    if (!isUUID(requestId) || !isUUID(actorId)) return res.status(400).json({ error: "requestId et actorId requis (uuid)" });
+
+    // Charger la demande + groupe
+    const { data: reqRow } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, requester_id, status")
+      .eq("id", requestId)
+      .maybeSingle();
+    if (!reqRow) return res.status(404).json({ error: "request_not_found" });
+    if (reqRow.status !== "pending") return res.status(400).json({ error: "not_pending" });
+
+    // Vérifier droit: fondateur/admin
+    const adminOk = await isGroupAdminOrFounder(reqRow.group_id, actorId);
+    if (!adminOk) return res.status(403).json({ error: "forbidden" });
+
+    // Approuver
+    const { error: upErr } = await supabase
+      .from("group_join_requests")
+      .update({ status: "approved", decided_at: new Date().toISOString(), decided_by: actorId })
+      .eq("id", requestId);
+    if (upErr) return res.status(500).json({ error: upErr.message });
+
+    // Ajouter au groupe (si pas déjà membre)
+    const { data: memb } = await supabase
+      .from("groupes_membres")
+      .select("id")
+      .eq("groupe_id", reqRow.group_id)
+      .eq("user_id", reqRow.requester_id)
+      .maybeSingle();
+    if (!memb) {
+      await supabase.from("groupes_membres").insert({ groupe_id: reqRow.group_id, user_id: reqRow.requester_id, role: "membre", is_admin: false });
+    }
+
+    // Notifier le demandeur
+    await notifyUsersNative({
+      targetUserIds: [reqRow.requester_id],
+      title: "Demande acceptée",
+      message: "Votre demande pour rejoindre le groupe a été acceptée",
+      url: `/groupes/${reqRow.group_id}`,
+      data: { type: "group_join_request_approved", groupId: reqRow.group_id, requestId },
+    });
+
+    await logEvent({ category: "groups", action: "join.approve", status: "success", userId: actorId, context: { requestId, groupId: reqRow.group_id } });
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ /groups/requests/:requestId/approve:", e);
+    await logEvent({ category: "groups", action: "join.approve", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Refuser une demande
+app.post("/groups/requests/:requestId/deny", bodyParser.json(), async (req, res) => {
+  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
+  try {
+    const requestId = req.params.requestId;
+    const { actorId } = req.body || {};
+    if (!isUUID(requestId) || !isUUID(actorId)) return res.status(400).json({ error: "requestId et actorId requis (uuid)" });
+
+    const { data: reqRow } = await supabase
+      .from("group_join_requests")
+      .select("id, group_id, requester_id, status")
+      .eq("id", requestId)
+      .maybeSingle();
+    if (!reqRow) return res.status(404).json({ error: "request_not_found" });
+    if (reqRow.status !== "pending") return res.status(400).json({ error: "not_pending" });
+
+    const adminOk = await isGroupAdminOrFounder(reqRow.group_id, actorId);
+    if (!adminOk) return res.status(403).json({ error: "forbidden" });
+
+    const { error: upErr } = await supabase
+      .from("group_join_requests")
+      .update({ status: "denied", decided_at: new Date().toISOString(), decided_by: actorId })
+      .eq("id", requestId);
+    if (upErr) return res.status(500).json({ error: upErr.message });
+
+    await notifyUsersNative({
+      targetUserIds: [reqRow.requester_id],
+      title: "Demande refusée",
+      message: "Votre demande pour rejoindre le groupe a été refusée",
+      url: `/groupes/${reqRow.group_id}`,
+      data: { type: "group_join_request_denied", groupId: reqRow.group_id, requestId },
+    });
+
+    await logEvent({ category: "groups", action: "join.deny", status: "success", userId: actorId, context: { requestId, groupId: reqRow.group_id } });
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ /groups/requests/:requestId/deny:", e);
+    await logEvent({ category: "groups", action: "join.deny", status: "error", context: { error: e?.message || e } });
+    res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -163,7 +319,7 @@ async function buildLivekitToken({ userId, roomName, isHost }) {
 }
 
 // ============================================================
-// 🔔 Web Push (VAPID) - Configuration si variables présentes
+// Web Push (VAPID) - Configuration si variables présentes
 // ============================================================
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
@@ -172,16 +328,50 @@ const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:contact@onekamer.co";
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   try {
     webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-    console.log("✅ VAPID configuré (Web Push activé)");
+    console.log(" VAPID configuré (Web Push activé)");
   } catch (e) {
-    console.warn("⚠️ Échec configuration VAPID:", e?.message || e);
+    console.warn(" Échec configuration VAPID:", e?.message || e);
   }
 } else {
-  console.warn("ℹ️ VAPID non configuré (VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY manquants)");
+  console.warn(" VAPID non configuré (VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY manquants)");
+}
+
+// Helper minimal d'envoi Web Push natif à une liste d'utilisateurs
+async function notifyUsersNative({ targetUserIds = [], title = "OneKamer", message = "", url = "/", data = {} }) {
+  if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) return { sent: 0 };
+  try {
+    const { data: subs, error: subErr } = await supabase
+      .from("push_subscriptions")
+      .select("user_id, endpoint, p256dh, auth")
+      .in("user_id", targetUserIds);
+    if (subErr) console.warn(" Lecture subscriptions échouée:", subErr.message);
+
+    const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+    const badge = "https://onekamer-media-cdn.b-cdn.net/android-chrome-72x72.png";
+    const payload = JSON.stringify({ title, body: message, icon, badge, url, data });
+    let sent = 0;
+    if (Array.isArray(subs)) {
+      for (const s of subs) {
+        try {
+          await webpush.sendNotification(
+            { endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } },
+            payload
+          );
+          sent++;
+        } catch (e) {
+          console.warn(" Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
+        }
+      }
+    }
+    return { sent };
+  } catch (e) {
+    console.warn(" notifyUsersNative error:", e?.message || e);
+    return { sent: 0 };
+  }
 }
 
 // ============================================================
-// 🔎 Journalisation auto (évènements sensibles) -> public.server_logs
+// Journalisation auto (évènements sensibles) -> public.server_logs
 //   Colonnes attendues (recommandées) :
 //     id uuid default gen_random_uuid() PK
 //     created_at timestamptz default now()
