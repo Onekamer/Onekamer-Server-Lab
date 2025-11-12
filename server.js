@@ -317,11 +317,8 @@ async function buildLivekitToken({ userId, roomName, isHost }) {
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   if (!apiKey || !apiSecret) throw new Error("LIVEKIT_API_KEY/SECRET manquants");
 
-  // API v2: passer apiKey/apiSecret, pas issuer/secret
-  const at = new AccessToken({
-    apiKey,
-    apiSecret,
-  });
+  // API v2: utiliser le constructeur (apiKey, apiSecret)
+  const at = new AccessToken(apiKey, apiSecret);
   at.identity = userId;
   at.addGrant({
     roomJoin: true,
