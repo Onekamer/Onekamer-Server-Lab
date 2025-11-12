@@ -125,7 +125,6 @@ app.post("/api/groups/requests/:requestId/deny", (req, res, next) => {
 
 // Créer une demande d’adhésion
 app.post("/groups/:groupId/join-request", bodyParser.json(), async (req, res) => {
-  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
   try {
     const groupId = req.params.groupId;
     const { requesterId } = req.body || {};
@@ -178,7 +177,6 @@ app.post("/groups/:groupId/join-request", bodyParser.json(), async (req, res) =>
 
 // Approuver une demande
 app.post("/groups/requests/:requestId/approve", bodyParser.json(), async (req, res) => {
-  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
   try {
     const requestId = req.params.requestId;
     const { actorId } = req.body || {};
@@ -235,7 +233,6 @@ app.post("/groups/requests/:requestId/approve", bodyParser.json(), async (req, r
 
 // Refuser une demande
 app.post("/groups/requests/:requestId/deny", bodyParser.json(), async (req, res) => {
-  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
   try {
     const requestId = req.params.requestId;
     const { actorId } = req.body || {};
@@ -320,10 +317,10 @@ async function buildLivekitToken({ userId, roomName, isHost }) {
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   if (!apiKey || !apiSecret) throw new Error("LIVEKIT_API_KEY/SECRET manquants");
 
-  // API v2
+  // API v2: passer apiKey/apiSecret, pas issuer/secret
   const at = new AccessToken({
-    issuer: apiKey,
-    secret: apiSecret,
+    apiKey,
+    apiSecret,
   });
   at.identity = userId;
   at.addGrant({
