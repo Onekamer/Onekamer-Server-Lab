@@ -23,7 +23,6 @@ import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import notificationsRouter from "./api/notifications.js";
-import webpush from "web-push";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -32,7 +31,6 @@ const fetch = globalThis.fetch;
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
 const app = express();
-const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
@@ -94,24 +92,6 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
-
-// ============================================================
-// 🔔 Web Push (VAPID) - Configuration si variables présentes
-// ============================================================
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:contact@onekamer.co";
-
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  try {
-    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-    console.log("✅ VAPID configuré (Web Push activé)");
-  } catch (e) {
-    console.warn("⚠️ Échec configuration VAPID:", e?.message || e);
-  }
-} else {
-  console.warn("ℹ️ VAPID non configuré (VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY manquants)");
-}
 
 // ============================================================
 // 🔎 Journalisation auto (évènements sensibles) -> public.server_logs
@@ -477,150 +457,6 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
 });
 
 // ============================================================
-// 🔔 Web Push (Option C) — Routes natives
-// ============================================================
-
-// Enregistre la subscription Web Push pour un utilisateur
-app.post("/push/subscribe", async (req, res) => {
-  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
-
-  try {
-    const { userId, endpoint, keys } = req.body || {};
-    if (!userId || !endpoint || !keys?.p256dh || !keys?.auth) {
-      return res.status(400).json({ error: "userId, endpoint, keys.p256dh et keys.auth requis" });
-    }
-
-    // Upsert par endpoint
-    await supabase.from("push_subscriptions").delete().eq("endpoint", endpoint);
-    const { error } = await supabase.from("push_subscriptions").insert({
-      user_id: userId,
-      endpoint,
-      p256dh: keys.p256dh,
-      auth: keys.auth,
-    });
-    if (error) {
-      console.error("❌ Erreur insert subscription:", error.message);
-      return res.status(500).json({ error: "Erreur enregistrement subscription" });
-    }
-
-    await logEvent({
-      category: "notifications",
-      action: "push.subscribe",
-      status: "success",
-      userId,
-      context: { endpoint },
-    });
-
-    res.json({ success: true });
-  } catch (e) {
-    console.error("❌ Erreur /push/subscribe:", e);
-    res.status(500).json({ error: e?.message || "Erreur interne" });
-  }
-});
-
-// Dispatch d'un événement: insert en base + envoi Web Push
-app.post("/notifications/dispatch", async (req, res) => {
-  if (NOTIF_PROVIDER !== "supabase_light") return res.status(200).json({ ignored: true });
-
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-    console.warn("⚠️ Dispatch refusé: VAPID non configuré");
-    return res.status(200).json({ success: false, reason: "vapid_not_configured" });
-  }
-
-  try {
-    const { title, message, targetUserIds = [], data = {}, url = "/" } = req.body || {};
-    if (!title || !message || !Array.isArray(targetUserIds) || targetUserIds.length === 0) {
-      return res.status(400).json({ error: "title, message et targetUserIds requis" });
-    }
-
-    // 1) Insert notifications (best-effort)
-    try {
-      const rows = targetUserIds.map((uid) => ({
-        user_id: uid,
-        title,
-        message,
-        type: data?.type || null,
-        link: url,
-      }));
-      const { error: insErr } = await supabase.from("notifications").insert(rows);
-      if (insErr) console.warn("⚠️ Insert notifications échoué:", insErr.message);
-    } catch (e) {
-      console.warn("⚠️ Insert notifications (best-effort) erreur:", e?.message || e);
-    }
-
-    // 2) Récup subscriptions et envoi push
-    const { data: subs, error: subErr } = await supabase
-      .from("push_subscriptions")
-      .select("user_id, endpoint, p256dh, auth")
-      .in("user_id", targetUserIds);
-    if (subErr) {
-      console.warn("⚠️ Lecture subscriptions échouée:", subErr.message);
-    }
-
-    const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
-    const payload = (uid) => JSON.stringify({
-      title: title || "OneKamer",
-      body: message,
-      icon,
-      url,
-      data,
-    });
-
-    let sent = 0;
-    if (Array.isArray(subs)) {
-      for (const s of subs) {
-        try {
-          await webpush.sendNotification(
-            {
-              endpoint: s.endpoint,
-              expirationTime: null,
-              keys: { p256dh: s.p256dh, auth: s.auth },
-            },
-            payload(s.user_id)
-          );
-          sent++;
-        } catch (e) {
-          console.warn("⚠️ Échec envoi push à", s.user_id, e?.statusCode || e?.message || e);
-        }
-      }
-    }
-
-    await logEvent({
-      category: "notifications",
-      action: "dispatch",
-      status: "success",
-      context: { target_count: targetUserIds.length, sent },
-    });
-
-    res.json({ success: true, sent });
-  } catch (e) {
-    console.error("❌ Erreur /notifications/dispatch:", e);
-    await logEvent({
-      category: "notifications",
-      action: "dispatch",
-      status: "error",
-      context: { error: e?.message || e },
-    });
-    res.status(500).json({ error: e?.message || "Erreur interne" });
-  }
-});
-
-// ============================================================
-// 🔁 Aliases compatibilité pour chemins /api
-// ============================================================
-app.post("/api/push/subscribe", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/push/subscribe → /push/subscribe");
-  req.url = "/push/subscribe";
-  app._router.handle(req, res, next);
-});
-
-app.post("/api/notifications/dispatch", (req, res, next) => {
-  console.log("🔁 Alias activé : /api/notifications/dispatch → /notifications/dispatch");
-  req.url = "/notifications/dispatch";
-  app._router.handle(req, res, next);
-});
-
-// ============================================================
 // 2️⃣ Création de session Stripe - OK COINS
 // ============================================================
 
@@ -906,8 +742,89 @@ app.post("/notify-withdrawal", async (req, res) => {
       userId,
       context: { error: err?.message || err },
     });
-    return res.status(500).json({ error: "Échec notification Telegram" });
+    res.status(500).json({ error: "Échec notification Telegram" });
   }
+});
+
+// ============================================================
+// 7️⃣ Notifications OneSignal
+// ============================================================
+
+app.post("/send-notification", async (req, res) => {
+  const { title, message } = req.body;
+
+  if (!title || !message) {
+    return res.status(400).json({ error: "title et message requis" });
+  }
+
+  try {
+    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${process.env.ONESIGNAL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        app_id: process.env.ONESIGNAL_APP_ID,
+        headings: { en: title },
+        contents: { en: message },
+        included_segments: ["All"], // Tous les abonnés
+        url: "https://onekamer.co",  // Lien cliquable optionnel
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.errors) {
+      console.error("❌ Erreur OneSignal:", data.errors);
+      await logEvent({
+        category: "onesignal",
+        action: "notification.send",
+        status: "error",
+        context: { title, message, errors: data.errors },
+      });
+      return res.status(500).json({ error: data.errors });
+    }
+
+    console.log("✅ Notification OneSignal envoyée :", data.id);
+    await logEvent({
+      category: "onesignal",
+      action: "notification.send",
+      status: "success",
+      context: { title, message, notification_id: data.id },
+    });
+
+    res.json({ success: true, notification_id: data.id });
+  } catch (err) {
+    console.error("❌ Erreur envoi OneSignal:", err);
+    await logEvent({
+      category: "onesignal",
+      action: "notification.send",
+      status: "error",
+      context: { title, message, error: err.message },
+    });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+console.log("✅ Route OneSignal /send-notification chargée");
+
+// ============================================================
+// 🔁 Alias de compatibilité : /notifications/onesignal
+// (utilisé par le front Horizon / Codex)
+// ============================================================
+app.post("/notifications/onesignal", (req, res, next) => {
+  console.log("🔁 Alias activé : /notifications/onesignal → /send-notification");
+  req.url = "/send-notification";
+  app._router.handle(req, res, next);
+});
+
+// ============================================================
+// 6️⃣ Route de santé (Render health check)
+// ============================================================
+
+app.get("/", (req, res) => {
+  res.send("✅ OneKamer backend est opérationnel !");
 });
 // ============================================================
 // 🔁 Auto-Fix Images (annonces, partenaires, événements)
