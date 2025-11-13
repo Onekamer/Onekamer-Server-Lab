@@ -61,7 +61,6 @@ function isDevOrigin(origin) {
   } catch (_e) {
     return false;
   }
-}
 
 function isUUID(v) {
   return (
