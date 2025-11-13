@@ -100,25 +100,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
-// Aliases /api → routes groupes
-app.post("/api/groups/:groupId/join-request", (req, res, next) => {
-  console.log("🔁 Alias: /api/groups/:groupId/join-request → /groups/:groupId/join-request");
-  req.url = `/groups/${req.params.groupId}/join-request`;
-  app._router.handle(req, res, next);
-});
-
-app.post("/api/groups/requests/:requestId/approve", (req, res, next) => {
-  console.log("🔁 Alias: /api/groups/requests/:requestId/approve → /groups/requests/:requestId/approve");
-  req.url = `/groups/requests/${req.params.requestId}/approve`;
-  app._router.handle(req, res, next);
-});
-
-app.post("/api/groups/requests/:requestId/deny", (req, res, next) => {
-  console.log("🔁 Alias: /api/groups/requests/:requestId/deny → /groups/requests/:requestId/deny");
-  req.url = `/groups/requests/${req.params.requestId}/deny`;
-  app._router.handle(req, res, next);
-});
-
 // ============================================================
 // Groupes — Demandes d’adhésion (LAB)
 // ============================================================
