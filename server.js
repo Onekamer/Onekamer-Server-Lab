@@ -61,12 +61,6 @@ function isDevOrigin(origin) {
   } catch (_e) {
     return false;
   }
-
-function isUUID(v) {
-  return (
-    typeof v === "string" &&
-    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(v)
-  );
 }
 
 app.use(
@@ -547,7 +541,6 @@ app.get("/api/groups/:groupId/live", async (req, res) => {
   try {
     const groupId = req.params.groupId;
     if (!groupId) return res.status(400).json({ error: "groupId requis" });
-    if (!isUUID(groupId)) return res.status(400).json({ error: "invalid_group_id" });
 
     const { data, error } = await supabase
       .from("group_live_sessions")
@@ -577,8 +570,6 @@ app.post("/api/groups/:groupId/live/start", bodyParser.json(), async (req, res) 
     const groupId = req.params.groupId;
     const { userId } = req.body || {};
     if (!groupId || !userId) return res.status(400).json({ error: "groupId et userId requis" });
-    if (!isUUID(groupId)) return res.status(400).json({ error: "invalid_group_id" });
-    if (!isUUID(userId)) return res.status(400).json({ error: "invalid_user_id" });
 
     const isAllowed = await isGroupAdminOrFounder(groupId, userId);
     if (!isAllowed) return res.status(403).json({ error: "Accès refusé" });
@@ -615,8 +606,6 @@ app.post("/api/groups/:groupId/live/stop", bodyParser.json(), async (req, res) =
     const groupId = req.params.groupId;
     const { userId, reason } = req.body || {};
     if (!groupId || !userId) return res.status(400).json({ error: "groupId et userId requis" });
-    if (!isUUID(groupId)) return res.status(400).json({ error: "invalid_group_id" });
-    if (!isUUID(userId)) return res.status(400).json({ error: "invalid_user_id" });
 
     const isAllowed = await isGroupAdminOrFounder(groupId, userId);
     if (!isAllowed) return res.status(403).json({ error: "Accès refusé" });
@@ -649,11 +638,9 @@ app.post("/api/livekit/token", bodyParser.json(), async (req, res) => {
   try {
     const { userId, groupId, roomName: bodyRoom } = req.body || {};
     if (!userId) return res.status(400).json({ error: "userId requis" });
-    if (!isUUID(userId)) return res.status(400).json({ error: "invalid_user_id" });
 
     let roomName = bodyRoom;
     if (!roomName && groupId) {
-      if (!isUUID(groupId)) return res.status(400).json({ error: "invalid_group_id" });
       const { data: live } = await supabase
         .from("group_live_sessions")
         .select("room_name, host_user_id")
