@@ -879,34 +879,7 @@ app.post("/api/livekit/token", bodyParser.json(), async (req, res) => {
     const token = await buildLivekitToken({ userId, roomName, isHost });
     const hostUrl = getLivekitUrl();
 
-    // 🔍 Debug temporaire: valider le token côté LiveKit (HTTP)
-    let lkValidateStatus = null;
-    try {
-      const httpUrl = (hostUrl || "").replace(/^wss:\/\//, "https://");
-      if (httpUrl) {
-        const vRes = await fetch(`${httpUrl}/rtc/validate?access_token=${encodeURIComponent(token)}`);
-        lkValidateStatus = vRes.status || null;
-      }
-    } catch (_e) {
-      lkValidateStatus = -1;
-    }
-
-    // 🔍 Claims non sensibles pour diagnostic
-    let claims = {};
-    try {
-      const [, p] = token.split(".");
-      const json = JSON.parse(Buffer.from(p, "base64").toString("utf8"));
-      const iss = typeof json?.iss === "string" ? json.iss : undefined;
-      const room = json?.room || json?.video?.room;
-      claims = {
-        issStart: iss ? `${iss.slice(0, 6)}***` : undefined,
-        sub: json?.sub,
-        room,
-        exp: json?.exp,
-      };
-    } catch {}
-
-    res.json({ token, hostUrl, roomName, role: isHost ? "host" : "viewer", lkValidateStatus, claims });
+    res.json({ token, hostUrl, roomName, role: isHost ? "host" : "viewer" });
   } catch (e) {
     console.error("❌ POST /api/livekit/token:", e);
     await logEvent({ category: "live", action: "token", status: "error", context: { error: e?.message || e } });
