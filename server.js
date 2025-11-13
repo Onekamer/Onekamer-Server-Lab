@@ -26,7 +26,7 @@ import qrcodeRouter from "./api/qrcode.js";
 import pushRouter from "./api/push.js";
 import webpush from "web-push";
 import cron from "node-cron";
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, VideoGrant } from "livekit-server-sdk";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -151,15 +151,14 @@ async function buildLivekitToken({ userId, roomName, isHost }) {
     secret: apiSecret,
   });
   at.identity = userId;
-  at.addGrant({
-    video: {
-      roomJoin: true,
-      room: roomName,
-      canPublish: !!isHost,
-      canSubscribe: true,
-      canPublishData: !!isHost,
-    },
+  const grant = new VideoGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: !!isHost,
+    canSubscribe: true,
+    canPublishData: !!isHost,
   });
+  at.addGrant(grant);
   const jwt = await at.toJwt();
   return jwt;
 }
