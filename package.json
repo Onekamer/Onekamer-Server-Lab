@@ -26,6 +26,6 @@
   "engines": {
     "node": ">=20.x"
   },
-  "author": "William Soppo & Annaëlle Bilounga",
+  "author": "William Soppo",
   "license": "MIT"
 }
