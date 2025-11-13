@@ -1,4 +1,4 @@
-# 🧪 OneKamer.co – Backend API (LAB)
+# 🧪 OneKamer – Backend API (LAB)
 
 ## 🌍 Description
 Version **de test et de développement** du serveur **OneKamer.co**, construite avec **Node.js / Express**  
