@@ -5,13 +5,10 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "migrate:audio:dry": "node scripts/migrate_audio_to_bunny.js --dry-run --limit=20",
-    "migrate:audio:first": "node scripts/migrate_audio_to_bunny.js --limit=20"
+    "start": "node server.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.3",
-    "@livekit/server-sdk": "^1.2.3",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
