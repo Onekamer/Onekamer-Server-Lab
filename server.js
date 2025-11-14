@@ -18,6 +18,7 @@ import Stripe from "stripe";
 import bodyParser from "body-parser";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
+import { AccessToken } from "livekit-server-sdk";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
@@ -92,6 +93,91 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+// ============================================================
+// 🎥 LiveKit - Config de base (LAB)
+// ============================================================
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
+const LIVEKIT_URL = process.env.LIVEKIT_URL;
+
+function createGroupRoomName(groupId) {
+  return `group_${groupId}`;
+}
+
+async function ensureUserIsGroupMember(groupId, userId) {
+  const { data, error } = await supabase
+    .from("groupes_membres")
+    .select("id")
+    .eq("groupe_id", groupId)
+    .eq("user_id", userId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Erreur vérification membre groupe:", error.message);
+    throw new Error("Erreur vérification du groupe");
+  }
+  if (!data) {
+    const err = new Error("Accès refusé au groupe");
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+async function getOrCreateGroupLiveSession(groupId, hostUserId) {
+  const { data: existing, error: existingErr } = await supabase
+    .from("group_live_sessions")
+    .select("id, room_name")
+    .eq("group_id", groupId)
+    .eq("is_live", true)
+    .limit(1)
+    .maybeSingle();
+
+  if (existingErr) {
+    console.error("❌ Erreur lecture group_live_sessions:", existingErr.message);
+    throw new Error("Erreur serveur (group_live_sessions)");
+  }
+
+  if (existing) {
+    return existing.room_name;
+  }
+
+  const roomName = createGroupRoomName(groupId);
+  const { error: insertErr } = await supabase.from("group_live_sessions").insert({
+    group_id: groupId,
+    host_user_id: hostUserId,
+    room_name: roomName,
+    is_live: true,
+  });
+
+  if (insertErr) {
+    console.error("❌ Erreur création group_live_sessions:", insertErr.message);
+    throw new Error("Impossible de créer la session live");
+  }
+
+  return roomName;
+}
+
+function createLivekitToken({ roomName, userId }) {
+  if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+    throw new Error("LiveKit non configuré côté serveur");
+  }
+
+  const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+    identity: userId,
+  });
+
+  at.addGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: true,
+    canPublishData: true,
+    canSubscribe: true,
+  });
+
+  return at.toJwt();
+}
 
 // ============================================================
 // 🔎 Journalisation auto (évènements sensibles) -> public.server_logs
@@ -453,6 +539,109 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
       context: { event_type: event?.type, error: err?.message || err },
     });
     res.status(500).send("Erreur serveur interne");
+  }
+});
+
+// ============================================================
+// 🎧🎥 LiveKit - Appels de groupe (LAB)
+// ============================================================
+
+app.post("/api/groups/:groupId/call/start", bodyParser.json(), async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!groupId || !userId) {
+      return res.status(400).json({ error: "groupId et userId sont requis" });
+    }
+
+    await ensureUserIsGroupMember(groupId, userId);
+
+    const roomName = await getOrCreateGroupLiveSession(groupId, userId);
+    const token = createLivekitToken({ roomName, userId });
+
+    res.json({
+      roomName,
+      token,
+      url: LIVEKIT_URL || null,
+    });
+  } catch (e) {
+    console.error("❌ POST /api/groups/:groupId/call/start:", e);
+    const status = e.statusCode || 500;
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/groups/:groupId/call/join", bodyParser.json(), async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!groupId || !userId) {
+      return res.status(400).json({ error: "groupId et userId sont requis" });
+    }
+
+    await ensureUserIsGroupMember(groupId, userId);
+
+    const { data: session, error } = await supabase
+      .from("group_live_sessions")
+      .select("room_name")
+      .eq("group_id", groupId)
+      .eq("is_live", true)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error("❌ Erreur lecture group_live_sessions (join):", error.message);
+      throw new Error("Erreur serveur (group_live_sessions)");
+    }
+
+    if (!session) {
+      return res.status(404).json({ error: "Aucun appel en cours pour ce groupe" });
+    }
+
+    const roomName = session.room_name;
+    const token = createLivekitToken({ roomName, userId });
+
+    res.json({
+      roomName,
+      token,
+      url: LIVEKIT_URL || null,
+    });
+  } catch (e) {
+    console.error("❌ POST /api/groups/:groupId/call/join:", e);
+    const status = e.statusCode || 500;
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/groups/:groupId/call/end", bodyParser.json(), async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { userId } = req.body || {};
+
+    if (!groupId || !userId) {
+      return res.status(400).json({ error: "groupId et userId sont requis" });
+    }
+
+    await ensureUserIsGroupMember(groupId, userId);
+
+    const { error } = await supabase
+      .from("group_live_sessions")
+      .update({ is_live: false, ended_at: new Date().toISOString(), ended_reason: "ended_by_user" })
+      .eq("group_id", groupId)
+      .eq("is_live", true);
+
+    if (error) {
+      console.error("❌ Erreur update group_live_sessions (end):", error.message);
+      throw new Error("Impossible de terminer l'appel");
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error("❌ POST /api/groups/:groupId/call/end:", e);
+    const status = e.statusCode || 500;
+    res.status(status).json({ error: e.message || "Erreur interne" });
   }
 });
 
