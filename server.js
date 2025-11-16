@@ -943,6 +943,39 @@ app.post("/notify-withdrawal", async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          chat_id: process.env.TELEGRAM_CHAT_ID,
+          text: message,
+          parse_mode: "Markdown",
+        }),
+      }
+    );
+
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.description || "Erreur API Telegram");
+
+    console.log("📨 Notification Telegram envoyée avec succès.");
+    await logEvent({
+      category: "withdrawal",
+      action: "telegram.notify",
+      status: "success",
+      userId,
+      context: { telegram_message_id: data?.result?.message_id || null },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Erreur notification Telegram :", err);
+    await logEvent({
+      category: "withdrawal",
+      action: "telegram.notify",
+      status: "error",
+      userId,
+      context: { error: err?.message || err },
+    });
+    res.status(500).json({ error: "Échec notification Telegram" });
+  }
+});
+
 // 7️⃣ Notifications OneSignal
 // ============================================================
 
