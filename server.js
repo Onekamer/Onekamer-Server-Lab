@@ -96,7 +96,7 @@ const supabase = createClient(
 );
 
 // ============================================================
-// 📧 Email - Transport Nodemailer (LAB)
+// 📧 Email - Brevo HTTP API (LAB) + fallback Nodemailer
 // ============================================================
 
 const smtpHost = process.env.SMTP_HOST;
@@ -106,6 +106,10 @@ const smtpPort = process.env.SMTP_PORT
 const smtpUser = process.env.SMTP_USER;
 const smtpPass = process.env.SMTP_PASS;
 const fromEmail = process.env.FROM_EMAIL || "no-reply@onekamer.co";
+
+// Clé API Brevo HTTP (recommandé sur Render)
+const brevoApiKey = process.env.BREVO_API_KEY;
+const brevoApiUrl = process.env.BREVO_API_URL || "https://api.brevo.com/v3/smtp/email";
 
 let mailTransport = null;
 
@@ -128,12 +132,53 @@ function getMailTransport() {
         user: smtpUser,
         pass: smtpPass,
       },
-      // ⏱️ Timeouts pour éviter les blocages infinís
       connectionTimeout: 15000,
       socketTimeout: 15000,
     });
   }
   return mailTransport;
+}
+
+async function sendEmailViaBrevo({ to, subject, text }) {
+  if (!brevoApiKey) {
+    console.warn("⚠️ BREVO_API_KEY manquant, tentative via transport SMTP Nodemailer");
+    const transport = getMailTransport();
+    await transport.sendMail({ from: fromEmail, to, subject, text });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(brevoApiUrl, {
+      method: "POST",
+      headers: {
+        "api-key": brevoApiKey,
+        "Content-Type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        sender: { email: fromEmail },
+        to: [{ email: to }],
+        subject,
+        textContent: text,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Brevo API error ${response.status}: ${errorText}`);
+    }
+
+    console.log("📧 Brevo HTTP API → email envoyé à", to);
+  } catch (err) {
+    console.error("❌ Erreur Brevo HTTP API:", err.message || err);
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ============================================================
@@ -1152,7 +1197,6 @@ app.post("/admin/email/process-jobs", async (req, res) => {
 
     console.log("📧 /admin/email/process-jobs → récupération", jobs.length, "jobs pending");
 
-    const transport = getMailTransport();
     let sentCount = 0;
     const errors = [];
 
@@ -1169,19 +1213,14 @@ app.post("/admin/email/process-jobs", async (req, res) => {
         }
 
         console.log("📧 Envoi email job", job.id, "→", job.to_email);
-        const timeout = setTimeout(() => {
-          console.error("⏰ Timeout envoi email job", job.id);
-          throw new Error("Timeout envoi email");
-        }, 30000); // 30 secondes
 
-        await transport.sendMail({
-          from: fromEmail,
+        // Envoi via Brevo HTTP API (ou fallback SMTP interne si BREVO_API_KEY manquante)
+        await sendEmailViaBrevo({
           to: job.to_email,
           subject: job.subject,
           text: textBody,
         });
 
-        clearTimeout(timeout);
         console.log("✅ Email envoyé job", job.id);
 
         await supabase
