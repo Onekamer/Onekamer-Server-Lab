@@ -115,6 +115,11 @@ function getMailTransport() {
       console.warn("⚠️ SMTP non configuré (HOST/USER/PASS manquants)");
       throw new Error("SMTP non configuré côté serveur LAB");
     }
+    console.log("📧 Initialisation transport SMTP Nodemailer", {
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
+    });
     mailTransport = nodemailer.createTransport({
       host: smtpHost,
       port: smtpPort,
@@ -123,6 +128,9 @@ function getMailTransport() {
         user: smtpUser,
         pass: smtpPass,
       },
+      // ⏱️ Timeouts pour éviter les blocages infinís
+      connectionTimeout: 15000,
+      socketTimeout: 15000,
     });
   }
   return mailTransport;
@@ -1142,6 +1150,8 @@ app.post("/admin/email/process-jobs", async (req, res) => {
       return res.json({ processed: 0, message: "Aucun job pending" });
     }
 
+    console.log("📧 /admin/email/process-jobs → récupération", jobs.length, "jobs pending");
+
     const transport = getMailTransport();
     let sentCount = 0;
     const errors = [];
@@ -1158,6 +1168,12 @@ app.post("/admin/email/process-jobs", async (req, res) => {
           textBody = job.payload?.message || "";
         }
 
+        console.log("📧 Envoi email job", job.id, "→", job.to_email);
+        const timeout = setTimeout(() => {
+          console.error("⏰ Timeout envoi email job", job.id);
+          throw new Error("Timeout envoi email");
+        }, 30000); // 30 secondes
+
         await transport.sendMail({
           from: fromEmail,
           to: job.to_email,
@@ -1165,12 +1181,13 @@ app.post("/admin/email/process-jobs", async (req, res) => {
           text: textBody,
         });
 
+        clearTimeout(timeout);
+        console.log("✅ Email envoyé job", job.id);
+
         await supabase
           .from("email_jobs")
           .update({ status: "sent", updated_at: new Date().toISOString() })
           .eq("id", job.id);
-
-        sentCount += 1;
       } catch (err) {
         console.error("❌ Erreur envoi email pour job", job.id, ":", err.message);
         errors.push({ id: job.id, error: err.message });
@@ -1185,6 +1202,12 @@ app.post("/admin/email/process-jobs", async (req, res) => {
       }
     }
 
+    console.log("📧 /admin/email/process-jobs terminé →", {
+      processed: jobs.length,
+      sent: sentCount,
+      errorsCount: errors.length,
+    });
+
     res.json({ processed: jobs.length, sent: sentCount, errors });
   } catch (e) {
     const status = e.statusCode || 500;
@@ -1193,11 +1216,7 @@ app.post("/admin/email/process-jobs", async (req, res) => {
   }
 });
 
-// ============================================================
-// 6️⃣ Route de santé (Render health check)
-// ============================================================
-
-app.get("/", (req, res) => {
+// ...
   res.send("✅ OneKamer backend est opérationnel !");
 });
 
