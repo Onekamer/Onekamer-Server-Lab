@@ -19,6 +19,7 @@ import bodyParser from "body-parser";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import { AccessToken } from "livekit-server-sdk";
+import nodemailer from "nodemailer";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
@@ -93,6 +94,39 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+// ============================================================
+// 📧 Email - Transport Nodemailer (LAB)
+// ============================================================
+
+const smtpHost = process.env.SMTP_HOST;
+const smtpPort = process.env.SMTP_PORT
+  ? parseInt(process.env.SMTP_PORT, 10)
+  : 587;
+const smtpUser = process.env.SMTP_USER;
+const smtpPass = process.env.SMTP_PASS;
+const fromEmail = process.env.FROM_EMAIL || "no-reply@onekamer.co";
+
+let mailTransport = null;
+
+function getMailTransport() {
+  if (!mailTransport) {
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      console.warn("⚠️ SMTP non configuré (HOST/USER/PASS manquants)");
+      throw new Error("SMTP non configuré côté serveur LAB");
+    }
+    mailTransport = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass,
+      },
+    });
+  }
+  return mailTransport;
+}
 
 // ============================================================
 // 🎥 LiveKit - Config de base (LAB)
@@ -909,40 +943,6 @@ app.post("/notify-withdrawal", async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chat_id: process.env.TELEGRAM_CHAT_ID,
-          text: message,
-          parse_mode: "Markdown",
-        }),
-      }
-    );
-
-    const data = await response.json();
-    if (!data.ok) throw new Error(data.description || "Erreur API Telegram");
-
-    console.log("📨 Notification Telegram envoyée avec succès.");
-    await logEvent({
-      category: "withdrawal",
-      action: "telegram.notify",
-      status: "success",
-      userId,
-      context: { telegram_message_id: data?.result?.message_id || null },
-    });
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("❌ Erreur notification Telegram :", err);
-    await logEvent({
-      category: "withdrawal",
-      action: "telegram.notify",
-      status: "error",
-      userId,
-      context: { error: err?.message || err },
-    });
-    res.status(500).json({ error: "Échec notification Telegram" });
-  }
-});
-
-// ============================================================
 // 7️⃣ Notifications OneSignal
 // ============================================================
 
@@ -1016,12 +1016,158 @@ app.post("/notifications/onesignal", (req, res, next) => {
 });
 
 // ============================================================
+// 8️⃣ Emails admin (LAB) - email_jobs
+// ============================================================
+
+function assertAdmin(req) {
+  const token = req.headers["x-admin-token"];
+  if (!token || token !== process.env.ADMIN_API_TOKEN) {
+    const err = new Error("Accès refusé (admin token invalide)");
+    err.statusCode = 401;
+    throw err;
+  }
+}
+
+function buildInfoAllBody({ username, message }) {
+  const safeName = username || "membre";
+  return `Bonjour ${safeName},\n\n${message}\n\n— L'équipe OneKamer`;
+}
+
+app.post("/admin/email/enqueue-info-all-users", async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { subject, message, limit } = req.body || {};
+    if (!subject || !message) {
+      return res.status(400).json({ error: "subject et message sont requis" });
+    }
+
+    const max = typeof limit === "number" && limit > 0 ? Math.min(limit, 1000) : 500;
+
+    const { data: profiles, error } = await supabase
+      .from("profiles")
+      .select("id, email, username")
+      .not("email", "is", null)
+      .limit(max);
+
+    if (error) {
+      console.error("❌ Erreur lecture profiles pour email_jobs:", error.message);
+      return res.status(500).json({ error: "Erreur lecture profils" });
+    }
+
+    if (!profiles || profiles.length === 0) {
+      return res.json({ inserted: 0, message: "Aucun profil avec email" });
+    }
+
+    const rows = profiles.map((p) => ({
+      status: "pending",
+      type: "info_all_users",
+      to_email: p.email,
+      subject,
+      template: "INFO_ALL",
+      payload: {
+        user_id: p.id,
+        username: p.username,
+        message,
+      },
+    }));
+
+    const { error: insertErr } = await supabase.from("email_jobs").insert(rows);
+    if (insertErr) {
+      console.error("❌ Erreur insert email_jobs:", insertErr.message);
+      return res.status(500).json({ error: "Erreur création jobs" });
+    }
+
+    res.json({ inserted: rows.length });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/email/enqueue-info-all-users:", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+app.post("/admin/email/process-jobs", async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { limit } = req.body || {};
+    const max = typeof limit === "number" && limit > 0 ? Math.min(limit, 100) : 50;
+
+    const { data: jobs, error } = await supabase
+      .from("email_jobs")
+      .select("id, to_email, subject, template, payload")
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .limit(max);
+
+    if (error) {
+      console.error("❌ Erreur lecture email_jobs:", error.message);
+      return res.status(500).json({ error: "Erreur lecture jobs" });
+    }
+
+    if (!jobs || jobs.length === 0) {
+      return res.json({ processed: 0, message: "Aucun job pending" });
+    }
+
+    const transport = getMailTransport();
+    let sentCount = 0;
+    const errors = [];
+
+    for (const job of jobs) {
+      try {
+        let textBody = "";
+        if (job.template === "INFO_ALL") {
+          textBody = buildInfoAllBody({
+            username: job.payload?.username,
+            message: job.payload?.message,
+          });
+        } else {
+          textBody = job.payload?.message || "";
+        }
+
+        await transport.sendMail({
+          from: fromEmail,
+          to: job.to_email,
+          subject: job.subject,
+          text: textBody,
+        });
+
+        await supabase
+          .from("email_jobs")
+          .update({ status: "sent", updated_at: new Date().toISOString() })
+          .eq("id", job.id);
+
+        sentCount += 1;
+      } catch (err) {
+        console.error("❌ Erreur envoi email pour job", job.id, ":", err.message);
+        errors.push({ id: job.id, error: err.message });
+        await supabase
+          .from("email_jobs")
+          .update({
+            status: "failed",
+            updated_at: new Date().toISOString(),
+            error_message: err.message,
+          })
+          .eq("id", job.id);
+      }
+    }
+
+    res.json({ processed: jobs.length, sent: sentCount, errors });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/email/process-jobs:", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
 // 6️⃣ Route de santé (Render health check)
 // ============================================================
 
 app.get("/", (req, res) => {
   res.send("✅ OneKamer backend est opérationnel !");
 });
+
 // ============================================================
 // 🔁 Auto-Fix Images (annonces, partenaires, événements)
 // ============================================================
