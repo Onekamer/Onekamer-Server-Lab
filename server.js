@@ -1216,7 +1216,11 @@ app.post("/admin/email/process-jobs", async (req, res) => {
   }
 });
 
-// ...
+// ============================================================
+// 6️⃣ Route de santé (Render health check)
+// ============================================================
+
+app.get("/", (req, res) => {
   res.send("✅ OneKamer backend est opérationnel !");
 });
 
