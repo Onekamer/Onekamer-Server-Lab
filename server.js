@@ -73,6 +73,14 @@ app.use(
         callback(new Error("Non autorisé par CORS"));
       }
     },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "x-admin-token",
+    ],
     credentials: true,
   })
 );
@@ -159,7 +167,8 @@ async function sendEmailViaBrevo({ to, subject, text }) {
         accept: "application/json",
       },
       body: JSON.stringify({
-        sender: { email: fromEmail },
+        // ⚠️ L'adresse doit être validée côté Brevo pour être vraiment utilisée
+        sender: { email: fromEmail, name: "OneKamer" },
         to: [{ email: to }],
         subject,
         textContent: text,
@@ -1142,6 +1151,23 @@ app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
         return res.json({ inserted: 0, message: "Aucune adresse email valide dans emails[]" });
       }
 
+      // ✅ On essaie de retrouver les usernames correspondants pour personnaliser "Bonjour {username}"
+      const emailUsernameMap = new Map();
+      const { data: profilesByEmail, error: profilesByEmailErr } = await supabase
+        .from("profiles")
+        .select("email, username")
+        .in("email", cleanEmails);
+
+      if (profilesByEmailErr) {
+        console.error("⚠️ Erreur lecture profiles pour emails explicites:", profilesByEmailErr.message);
+      } else if (profilesByEmail && profilesByEmail.length > 0) {
+        for (const p of profilesByEmail) {
+          if (p.email) {
+            emailUsernameMap.set(p.email, p.username || null);
+          }
+        }
+      }
+
       const rows = cleanEmails.map((email) => ({
         status: "pending",
         type: "info_all_users",
@@ -1150,7 +1176,7 @@ app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
         template: "INFO_ALL",
         payload: {
           user_id: null,
-          username: null,
+          username: emailUsernameMap.get(email) || null,
           message,
         },
       }));
@@ -1259,6 +1285,8 @@ app.post("/admin/email/process-jobs", cors(), async (req, res) => {
         });
 
         console.log("✅ Email envoyé job", job.id);
+
+        sentCount += 1;
 
         await supabase
           .from("email_jobs")
