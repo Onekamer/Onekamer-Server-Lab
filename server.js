@@ -1128,7 +1128,6 @@ function buildInfoAllBody({ username, message }) {
   return `Bonjour ${safeName},\n\n${message}\n\n— L'équipe OneKamer`;
 }
 
-// ✅ CORS explicite pour les routes admin email (préflight + POST)
 app.options("/admin/email/enqueue-info-all-users", cors());
 app.options("/admin/email/process-jobs", cors());
 
@@ -1136,7 +1135,7 @@ app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
   try {
     assertAdmin(req);
 
-    const { subject, message, limit, emails } = req.body || {};
+    const { subject, message, limit, emails, segment } = req.body || {};
     if (!subject || !message) {
       return res.status(400).json({ error: "subject et message sont requis" });
     }
@@ -1190,14 +1189,22 @@ app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
       return res.json({ inserted: rows.length, mode: "explicit_emails" });
     }
 
-    // Option 2: comportement historique basé sur la table profiles
+    // Option 2: comportement basé sur la table profiles, avec ciblage éventuel par plan
     const max = typeof limit === "number" && limit > 0 ? Math.min(limit, 1000) : 500;
 
-    const { data: profiles, error } = await supabase
+    let profilesQuery = supabase
       .from("profiles")
-      .select("id, email, username")
-      .not("email", "is", null)
-      .limit(max);
+      .select("id, email, username, plan")
+      .not("email", "is", null);
+
+    const normalizedSegment = (segment || "all").toString().toLowerCase();
+    if (["free", "standard", "vip"].includes(normalizedSegment)) {
+      profilesQuery = profilesQuery.eq("plan", normalizedSegment);
+    }
+
+    profilesQuery = profilesQuery.limit(max);
+
+    const { data: profiles, error } = await profilesQuery;
 
     if (error) {
       console.error("❌ Erreur lecture profiles pour email_jobs:", error.message);
@@ -1227,7 +1234,7 @@ app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
       return res.status(500).json({ error: "Erreur création jobs" });
     }
 
-    res.json({ inserted: rows.length });
+    res.json({ inserted: rows.length, mode: normalizedSegment });
   } catch (e) {
     const status = e.statusCode || 500;
     console.error("❌ /admin/email/enqueue-info-all-users:", e);
