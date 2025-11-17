@@ -1119,7 +1119,11 @@ function buildInfoAllBody({ username, message }) {
   return `Bonjour ${safeName},\n\n${message}\n\n— L'équipe OneKamer`;
 }
 
-app.post("/admin/email/enqueue-info-all-users", async (req, res) => {
+// ✅ CORS explicite pour les routes admin email (préflight + POST)
+app.options("/admin/email/enqueue-info-all-users", cors());
+app.options("/admin/email/process-jobs", cors());
+
+app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
   try {
     assertAdmin(req);
 
@@ -1205,7 +1209,7 @@ app.post("/admin/email/enqueue-info-all-users", async (req, res) => {
   }
 });
 
-app.post("/admin/email/process-jobs", async (req, res) => {
+app.post("/admin/email/process-jobs", cors(), async (req, res) => {
   try {
     assertAdmin(req);
 
