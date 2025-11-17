@@ -1130,6 +1130,7 @@ function buildInfoAllBody({ username, message }) {
 
 app.options("/admin/email/enqueue-info-all-users", cors());
 app.options("/admin/email/process-jobs", cors());
+app.options("/admin/email/count-segment", cors());
 
 app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
   try {
