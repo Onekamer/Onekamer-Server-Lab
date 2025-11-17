@@ -1123,11 +1123,44 @@ app.post("/admin/email/enqueue-info-all-users", async (req, res) => {
   try {
     assertAdmin(req);
 
-    const { subject, message, limit } = req.body || {};
+    const { subject, message, limit, emails } = req.body || {};
     if (!subject || !message) {
       return res.status(400).json({ error: "subject et message sont requis" });
     }
 
+    // Option 1: liste d'emails explicite fournie dans le body
+    if (Array.isArray(emails) && emails.length > 0) {
+      const cleanEmails = emails
+        .map((e) => (typeof e === "string" ? e.trim() : ""))
+        .filter((e) => e.length > 0);
+
+      if (cleanEmails.length === 0) {
+        return res.json({ inserted: 0, message: "Aucune adresse email valide dans emails[]" });
+      }
+
+      const rows = cleanEmails.map((email) => ({
+        status: "pending",
+        type: "info_all_users",
+        to_email: email,
+        subject,
+        template: "INFO_ALL",
+        payload: {
+          user_id: null,
+          username: null,
+          message,
+        },
+      }));
+
+      const { error: insertErr } = await supabase.from("email_jobs").insert(rows);
+      if (insertErr) {
+        console.error("❌ Erreur insert email_jobs (emails explicites):", insertErr.message);
+        return res.status(500).json({ error: "Erreur création jobs" });
+      }
+
+      return res.json({ inserted: rows.length, mode: "explicit_emails" });
+    }
+
+    // Option 2: comportement historique basé sur la table profiles
     const max = typeof limit === "number" && limit > 0 ? Math.min(limit, 1000) : 500;
 
     const { data: profiles, error } = await supabase
