@@ -1243,6 +1243,37 @@ app.post("/admin/email/enqueue-info-all-users", cors(), async (req, res) => {
   }
 });
 
+app.post("/admin/email/count-segment", cors(), async (req, res) => {
+  try {
+    assertAdmin(req);
+
+    const { segment } = req.body || {};
+    const normalizedSegment = (segment || "all").toString().toLowerCase();
+
+    let profilesQuery = supabase
+      .from("profiles")
+      .select("id", { count: "exact", head: true })
+      .not("email", "is", null);
+
+    if (["free", "standard", "vip"].includes(normalizedSegment)) {
+      profilesQuery = profilesQuery.eq("plan", normalizedSegment);
+    }
+
+    const { count, error } = await profilesQuery;
+
+    if (error) {
+      console.error("❌ /admin/email/count-segment:", error.message);
+      return res.status(500).json({ error: "Erreur lecture profils" });
+    }
+
+    res.json({ segment: normalizedSegment, count: count || 0 });
+  } catch (e) {
+    const status = e.statusCode || 500;
+    console.error("❌ /admin/email/count-segment (handler):", e);
+    res.status(status).json({ error: e.message || "Erreur interne" });
+  }
+});
+
 app.post("/admin/email/process-jobs", cors(), async (req, res) => {
   try {
     assertAdmin(req);
