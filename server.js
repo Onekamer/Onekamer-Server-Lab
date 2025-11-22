@@ -33,6 +33,7 @@ const fetch = globalThis.fetch;
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
 const app = express();
+const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
