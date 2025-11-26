@@ -61,6 +61,113 @@ function isDevOrigin(origin) {
   }
 }
 
+// ============================================================
+// 🔔 Helper générique @tous (LOG ONLY pour LAB)
+// ============================================================
+
+async function handleAtTousIfAllowed({
+  req,
+  supabase,
+  NOTIF_PROVIDER,
+  authorId,
+  contextType,
+  contextId,
+  rawText,
+}) {
+  try {
+    if (NOTIF_PROVIDER !== "supabase_light") return;
+    if (!rawText || typeof rawText !== "string") return;
+    if (!rawText.includes("@tous")) return;
+
+    // Vérifier que l'auteur est admin global
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, is_admin, role")
+      .eq("id", authorId)
+      .maybeSingle();
+
+    if (profileError || !profile) {
+      await logEvent({
+        category: "attous",
+        action: "guard.check_admin",
+        status: "error",
+        userId: authorId,
+        context: { reason: "profile_not_found", error: profileError?.message },
+      });
+      return;
+    }
+
+    const isAdmin = Boolean(profile.is_admin) || profile.role === "admin";
+    if (!isAdmin) {
+      await logEvent({
+        category: "attous",
+        action: "guard.not_admin",
+        status: "info",
+        userId: authorId,
+        context: { contextType, contextId },
+      });
+      return;
+    }
+
+    let targetUserIds = [];
+
+    if (contextType === "groupe") {
+      const { data: members, error: membersError } = await supabase
+        .from("groupes_membres")
+        .select("user_id")
+        .eq("groupe_id", contextId);
+
+      if (membersError) {
+        await logEvent({
+          category: "attous",
+          action: "fetch_members.error",
+          status: "error",
+          userId: authorId,
+          context: { contextType, contextId, error: membersError.message },
+        });
+        return;
+      }
+
+      targetUserIds = (members || [])
+        .map((m) => m.user_id)
+        .filter((id) => !!id && id !== authorId);
+    }
+
+    if (!Array.isArray(targetUserIds) || targetUserIds.length === 0) {
+      await logEvent({
+        category: "attous",
+        action: "target.empty",
+        status: "info",
+        userId: authorId,
+        context: { contextType, contextId },
+      });
+      return;
+    }
+
+    // Phase 1 LAB : on loggue uniquement ce qui serait envoyé (dry-run)
+    await logEvent({
+      category: "attous",
+      action: "push.dryrun",
+      status: "success",
+      userId: authorId,
+      context: {
+        contextType,
+        contextId,
+        target_count: targetUserIds.length,
+      },
+    });
+  } catch (e) {
+    console.warn("⚠️ handleAtTousIfAllowed error:", e?.message || e);
+    await logEvent({
+      category: "attous",
+      action: "exception",
+      status: "error",
+      userId: authorId,
+      context: { contextType, contextId, error: e?.message || String(e) },
+    });
+  }
+}
+
 app.use(
   cors({
     origin: function (origin, callback) {
@@ -724,6 +831,75 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
       context: { event_type: event?.type, error: err?.message || err },
     });
     res.status(500).send("Erreur serveur interne");
+  }
+});
+
+// ============================================================
+// 📨 Messages de groupes (LAB) + détection @tous (dry-run)
+// ============================================================
+
+app.post("/api/groups/:groupId/messages", bodyParser.json(), async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { senderId, content } = req.body || {};
+
+    if (!senderId || !groupId) {
+      return res
+        .status(400)
+        .json({ error: "senderId et groupId sont requis" });
+    }
+
+    if (!content || typeof content !== "string") {
+      return res.status(400).json({ error: "content est requis" });
+    }
+
+    const { data: inserted, error } = await supabase
+      .from("messages_groupes")
+      .insert({
+        groupe_id: groupId,
+        sender_id: senderId,
+        contenu: content,
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("❌ Erreur insert messages_groupes:", error.message);
+      await logEvent({
+        category: "group_message",
+        action: "insert",
+        status: "error",
+        userId: senderId,
+        context: { groupId, error: error.message },
+      });
+      return res
+        .status(400)
+        .json({ error: "Impossible d'enregistrer le message" });
+    }
+
+    await logEvent({
+      category: "group_message",
+      action: "insert",
+      status: "success",
+      userId: senderId,
+      context: { groupId, message_id: inserted?.id },
+    });
+
+    // Détection @tous (dry-run, pas d'envoi réel pour l'instant)
+    await handleAtTousIfAllowed({
+      req,
+      supabase,
+      NOTIF_PROVIDER,
+      authorId: senderId,
+      contextType: "groupe",
+      contextId: groupId,
+      rawText: content,
+    });
+
+    res.json({ success: true, id: inserted?.id || null });
+  } catch (e) {
+    console.error("❌ Erreur /api/groups/:groupId/messages:", e?.message || e);
+    res.status(500).json({ error: "Erreur interne serveur" });
   }
 });
 
