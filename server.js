@@ -24,7 +24,7 @@ import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
-import notificationsRouter from "./api/notifications.js";
+import pushRouter from "./api/push.js";
 
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
@@ -33,7 +33,7 @@ const fetch = globalThis.fetch;
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
 const app = express();
-const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "onesignal";
+const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "supabase_light";
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
@@ -92,7 +92,7 @@ app.use("/api", uploadRoute);
 app.use("/api", partenaireDefaultsRoute);
 app.use("/api", fixAnnoncesImagesRoute);
 app.use("/api", fixEvenementsImagesRoute);
-app.use("/api", notificationsRouter);
+app.use("/api", pushRouter);
 
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
