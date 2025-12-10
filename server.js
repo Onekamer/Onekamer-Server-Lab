@@ -1790,6 +1790,7 @@ app.post("/admin/email/process-jobs", cors(), async (req, res) => {
           })
           .eq("id", job.id);
       }
+    } // <--- Added closing bracket here
     console.log("📧 /admin/email/process-jobs terminé →", {
       processed: jobs.length,
       sent: sentCount,
@@ -1804,11 +1805,7 @@ app.post("/admin/email/process-jobs", cors(), async (req, res) => {
   }
 });
 
-// ============================================================
-// 9️⃣ Influenceurs & Codes promo (LAB)
-//    - Vue admin : stats globales via view_influenceurs_promo_stats
-//    - Vue influenceur : stats perso via user_id
-// ============================================================
+// ...
 
 app.get("/", (req, res) => {
   res.send("✅ OneKamer backend est opérationnel !");
