@@ -360,6 +360,22 @@ async function getActiveFeeSettings(currency) {
   return data;
 }
 
+async function requirePartnerOwner({ req, partnerId }) {
+  const guard = await requireUserJWT(req);
+  if (!guard.ok) return guard;
+
+  const { data: partner, error: pErr } = await supabase
+    .from("partners_market")
+    .select("id, owner_user_id, stripe_connect_account_id, payout_status")
+    .eq("id", partnerId)
+    .maybeSingle();
+
+  if (pErr) return { ok: false, status: 500, error: pErr.message || "partner_read_failed" };
+  if (!partner) return { ok: false, status: 404, error: "partner_not_found" };
+  if (partner.owner_user_id !== guard.userId) return { ok: false, status: 403, error: "forbidden" };
+  return { ok: true, userId: guard.userId, partner };
+}
+
 app.get("/api/market/partners", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -593,6 +609,52 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
       .eq("id", orderId);
 
     return res.json({ url: session.url });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.body || {};
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    let accountId = auth.partner?.stripe_connect_account_id || null;
+    if (!accountId) {
+      const account = await stripe.accounts.create({
+        type: "express",
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+      });
+
+      accountId = account.id;
+      await supabase
+        .from("partners_market")
+        .update({
+          stripe_connect_account_id: accountId,
+          payout_status: "incomplete",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", partnerId);
+    }
+
+    const frontendBase = "https://onekamer-front-lab.onrender.com";
+    const returnUrl = `${frontendBase}/compte`;
+    const refreshUrl = `${frontendBase}/compte`;
+
+    const link = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: refreshUrl,
+      return_url: returnUrl,
+      type: "account_onboarding",
+    });
+
+    return res.json({ url: link.url, accountId });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -1056,6 +1118,52 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   });
 
   try {
+    if (event.type === "account.updated") {
+      const account = event.data.object;
+      const accountId = account?.id ? String(account.id) : null;
+      if (accountId) {
+        const detailsSubmitted = account?.details_submitted === true;
+        const chargesEnabled = account?.charges_enabled === true;
+        const payoutsEnabled = account?.payouts_enabled === true;
+        const payoutStatus = detailsSubmitted && chargesEnabled && payoutsEnabled ? "complete" : "incomplete";
+
+        try {
+          await supabase
+            .from("partners_market")
+            .update({
+              payout_status: payoutStatus,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("stripe_connect_account_id", accountId);
+
+          await logEvent({
+            category: "marketplace",
+            action: "connect.account.updated",
+            status: "success",
+            context: {
+              stripe_connect_account_id: accountId,
+              payout_status: payoutStatus,
+              details_submitted: detailsSubmitted,
+              charges_enabled: chargesEnabled,
+              payouts_enabled: payoutsEnabled,
+            },
+          });
+        } catch (e) {
+          await logEvent({
+            category: "marketplace",
+            action: "connect.account.updated",
+            status: "error",
+            context: {
+              stripe_connect_account_id: accountId,
+              error: e?.message || String(e),
+            },
+          });
+        }
+      }
+
+      return res.json({ received: true });
+    }
+
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
       const { userId, packId, planKey, promoCode, eventId, paymentMode } = session.metadata || {};
