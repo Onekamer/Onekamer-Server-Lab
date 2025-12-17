@@ -21,6 +21,7 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import { AccessToken } from "livekit-server-sdk";
 import nodemailer from "nodemailer";
+import webpush from "web-push";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
@@ -60,6 +61,82 @@ function isDevOrigin(origin) {
   } catch (_e) {
     return false;
   }
+}
+
+// ============================================================
+// 🔔 supabase_light — Web Push (LAB)
+// ============================================================
+
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:contact@onekamer.co";
+
+try {
+  if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  }
+} catch {}
+
+async function sendSupabaseLightPush({ title, message, targetUserIds = [], data = {}, url = "/" }) {
+  if (NOTIF_PROVIDER !== "supabase_light") return { success: false, reason: "provider_disabled", sent: 0 };
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return { success: false, reason: "vapid_not_configured", sent: 0 };
+
+  const uniqueUserIds = Array.isArray(targetUserIds) ? Array.from(new Set(targetUserIds.filter(Boolean))) : [];
+  if (uniqueUserIds.length === 0) return { success: false, reason: "no_targets", sent: 0 };
+
+  const { data: subs } = await supabase
+    .from("push_subscriptions")
+    .select("user_id, endpoint, p256dh, auth")
+    .in("user_id", uniqueUserIds);
+
+  const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+  const payload = JSON.stringify({ title, body: message, icon, url, data });
+
+  let sent = 0;
+  if (Array.isArray(subs)) {
+    for (const s of subs) {
+      try {
+        await webpush.sendNotification(
+          { endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } },
+          payload
+        );
+        sent += 1;
+      } catch (err) {
+        console.error("webpush_send_error", {
+          status: err?.statusCode,
+          code: err?.code,
+          message: err?.message,
+        });
+      }
+    }
+  }
+
+  // Historique notifications in-app (RPC)
+  try {
+    const notifType = (data && (data.type || data.notificationType)) || "systeme";
+    const contentId = data && (data.contentId || data.content_id) ? data.contentId || data.content_id : null;
+    const senderId = data && (data.senderId || data.sender_id) ? data.senderId || data.sender_id : null;
+
+    for (const userId of uniqueUserIds) {
+      try {
+        await supabase.rpc("create_notification", {
+          p_user_id: userId,
+          p_sender_id: senderId,
+          p_type: notifType,
+          p_content_id: contentId,
+          p_title: title,
+          p_message: message,
+          p_link: url || "/",
+        });
+      } catch (err) {
+        console.error("notification_persist_error", { user_id: userId, message: err?.message });
+      }
+    }
+  } catch (err) {
+    console.error("notification_persist_wrapper_error", { message: err?.message });
+  }
+
+  return { success: true, sent };
 }
 
 // ============================================================
@@ -1330,14 +1407,134 @@ async function requireAdminIsAdmin(req) {
   const userId = userData.user.id;
   const { data: prof, error: pErr } = await supabase
     .from("profiles")
-    .select("is_admin")
+    .select("is_admin, role, username")
     .eq("id", userId)
     .maybeSingle();
 
   if (pErr || !prof) return { ok: false, status: 403, error: "forbidden" };
-  if (prof.is_admin !== true) return { ok: false, status: 403, error: "forbidden" };
-  return { ok: true, userId };
+  const isAdmin = Boolean(prof.is_admin) || String(prof.role || "").toLowerCase() === "admin";
+  if (!isAdmin) return { ok: false, status: 403, error: "forbidden" };
+  return { ok: true, userId, adminUsername: prof.username || null };
 }
+
+app.post("/api/admin/moderation/warn", async (req, res) => {
+  let actionId = null;
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { targetUserId, contentType, contentId, reason, message } = req.body || {};
+    if (!targetUserId || !contentType || !contentId || !reason || !message) {
+      return res.status(400).json({ error: "targetUserId, contentType, contentId, reason, message requis" });
+    }
+
+    const typeNorm = String(contentType).toLowerCase();
+    if (!["post", "audio_post"].includes(typeNorm)) {
+      return res.status(400).json({ error: "contentType invalide" });
+    }
+
+    const { data: targetProfile, error: tErr } = await supabase
+      .from("profiles")
+      .select("id, username, email")
+      .eq("id", targetUserId)
+      .maybeSingle();
+    if (tErr || !targetProfile) return res.status(404).json({ error: "target_not_found" });
+
+    const notifTitle = "Avertissement de modération";
+    const notifMessage = `${reason}: ${message}`;
+
+    const pushResult = await sendSupabaseLightPush({
+      title: notifTitle,
+      message: notifMessage,
+      targetUserIds: [targetUserId],
+      url: "/echange",
+      data: {
+        type: "moderation_warning",
+        contentType: typeNorm,
+        contentId: String(contentId),
+        senderId: guard.userId,
+        reason,
+      },
+    });
+
+    let emailSent = false;
+    let emailError = null;
+    if (targetProfile.email) {
+      try {
+        const subject = "Avertissement de modération - OneKamer";
+        const body = `Bonjour ${targetProfile.username || "membre"},\n\nMotif : ${reason}\n\nMessage :\n${message}\n\n— L'équipe OneKamer`;
+        await sendEmailViaBrevo({ to: targetProfile.email, subject, text: body });
+        emailSent = true;
+      } catch (e) {
+        emailError = e?.message || "Erreur envoi email";
+      }
+    }
+
+    const notificationSent = !!pushResult?.success;
+    const deliveryError = emailError || (!notificationSent ? String(pushResult?.reason || "push_failed") : null);
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("admin_moderation_actions")
+      .insert({
+        admin_user_id: guard.userId,
+        admin_username: guard.adminUsername,
+        target_user_id: targetUserId,
+        target_username: targetProfile.username || null,
+        content_type: typeNorm,
+        content_id: String(contentId),
+        action_type: "warning",
+        reason: String(reason),
+        message: String(message),
+        email_sent: emailSent,
+        notification_sent: notificationSent,
+        delivery_error: deliveryError,
+        meta: {},
+      })
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message || "Erreur insertion historique" });
+
+    actionId = inserted?.id || null;
+
+    return res.json({ success: true, actionId, emailSent, notificationSent, deliveryError });
+  } catch (e) {
+    console.error("❌ POST /api/admin/moderation/warn:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/admin/moderation/actions", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const limitRaw = req.query?.limit;
+    const offsetRaw = req.query?.offset;
+    const targetUserId = req.query?.targetUserId;
+    const contentType = req.query?.contentType;
+
+    const limit = Math.max(1, Math.min(parseInt(limitRaw || "50", 10) || 50, 200));
+    const offset = Math.max(0, parseInt(offsetRaw || "0", 10) || 0);
+
+    let q = supabase
+      .from("admin_moderation_actions")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (targetUserId) q = q.eq("target_user_id", targetUserId);
+    if (contentType) q = q.eq("content_type", String(contentType).toLowerCase());
+
+    q = q.range(offset, offset + limit - 1);
+
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture historique" });
+
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    console.error("❌ GET /api/admin/moderation/actions:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
 
 app.delete("/api/admin/echange/posts/:postId", async (req, res) => {
   try {
