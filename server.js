@@ -1312,6 +1312,84 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // ============================================================
+// 🛡️ Admin - Modération Échange communautaire
+//   - Suppression de posts texte (table posts)
+//   - Suppression de posts vocaux (table comments, content_type='echange')
+//   ⚠️ Sans toucher aux RLS : suppression via service-role après check is_admin
+// ============================================================
+
+async function requireAdminIsAdmin(req) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return { ok: false, status: 401, error: "unauthorized" };
+
+  const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, status: 401, error: "invalid_token" };
+
+  const userId = userData.user.id;
+  const { data: prof, error: pErr } = await supabase
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (pErr || !prof) return { ok: false, status: 403, error: "forbidden" };
+  if (prof.is_admin !== true) return { ok: false, status: 403, error: "forbidden" };
+  return { ok: true, userId };
+}
+
+app.delete("/api/admin/echange/posts/:postId", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const postId = req.params.postId;
+    if (!postId) return res.status(400).json({ error: "postId requis" });
+
+    await supabase.from("likes").delete().eq("content_type", "post").eq("content_id", postId);
+    await supabase.from("comments").delete().eq("content_type", "post").eq("content_id", postId);
+
+    const { error: delErr } = await supabase.from("posts").delete().eq("id", postId);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    return res.json({ deleted: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/echange/audio/:commentId", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const commentId = req.params.commentId;
+    if (!commentId) return res.status(400).json({ error: "commentId requis" });
+
+    const { data: row, error: getErr } = await supabase
+      .from("comments")
+      .select("id")
+      .eq("id", commentId)
+      .eq("content_type", "echange")
+      .maybeSingle();
+    if (getErr) return res.status(500).json({ error: getErr.message });
+    if (!row) return res.status(404).json({ error: "not_found" });
+
+    const { error: delErr } = await supabase
+      .from("comments")
+      .delete()
+      .eq("id", commentId)
+      .eq("content_type", "echange");
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    return res.json({ deleted: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
 // 2bis️⃣ Création de session Stripe - Paiement Évènement (full / deposit)
 // ============================================================
 
