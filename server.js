@@ -28,6 +28,7 @@ import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
 import fixEvenementsImagesRoute from "./api/fix-evenements-images.js";
 import pushRouter from "./api/push.js";
 import qrcodeRouter from "./api/qrcode.js";
+import { createFxService } from "./utils/fx.js";
 
 // ✅ Correction : utiliser le fetch natif de Node 18+ (pas besoin d'import)
 const fetch = globalThis.fetch;
@@ -288,6 +289,314 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+const fxService = createFxService({ supabase, fetchImpl: fetch });
+
+app.get("/api/market/fx-rate", async (req, res) => {
+  try {
+    const from = String(req.query.from || "").trim().toUpperCase();
+    const to = String(req.query.to || "").trim().toUpperCase();
+    if (!from || !to) return res.status(400).json({ error: "from et to requis" });
+
+    const rate = await fxService.getRate(from, to);
+    return res.json({ from, to, rate });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "fx_error" });
+  }
+});
+
+function countryToCurrency(countryCode) {
+  const cc = String(countryCode || "").trim().toUpperCase();
+  if (!cc) return "USD";
+  if (cc === "CA") return "CAD";
+  const euroCountries = new Set([
+    "AT",
+    "BE",
+    "CY",
+    "DE",
+    "EE",
+    "ES",
+    "FI",
+    "FR",
+    "GR",
+    "HR",
+    "IE",
+    "IT",
+    "LT",
+    "LU",
+    "LV",
+    "MT",
+    "NL",
+    "PT",
+    "SI",
+    "SK",
+  ]);
+  if (euroCountries.has(cc)) return "EUR";
+  if (cc === "US") return "USD";
+  return "USD";
+}
+
+async function requireUserJWT(req) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return { ok: false, status: 401, error: "unauthorized" };
+
+  const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, status: 401, error: "invalid_token" };
+
+  return { ok: true, userId: userData.user.id, token };
+}
+
+async function getActiveFeeSettings(currency) {
+  const cur = String(currency || "").trim().toUpperCase();
+  const { data, error } = await supabase
+    .from("marketplace_fee_settings")
+    .select("currency, percent_bps, fixed_fee_amount")
+    .eq("currency", cur)
+    .eq("is_active", true)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data;
+}
+
+app.get("/api/market/partners", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("partners_market")
+      .select(
+        "id, display_name, description, category, country_code, base_currency, status, payout_status, is_open, created_at"
+      )
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture partenaires" });
+
+    const partners = (data || []).map((p) => {
+      const isApproved = String(p.status || "").toLowerCase() === "approved";
+      const payoutComplete = String(p.payout_status || "").toLowerCase() === "complete";
+      const isOpen = p.is_open === true;
+      const commandable = isApproved && payoutComplete && isOpen;
+      return { ...p, commandable };
+    });
+
+    return res.json({ partners });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/:partnerId/items", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const { data: items, error } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, type, title, description, base_price_amount, is_available, is_published, media")
+      .eq("partner_id", partnerId)
+      .eq("is_published", true)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture items" });
+    return res.json({ items: items || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { partnerId, items, delivery_mode, customer_note } = req.body || {};
+    if (!partnerId || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "partnerId et items requis" });
+    }
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, status, payout_status, is_open, base_currency")
+      .eq("id", partnerId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const baseCurrency = String(partner.base_currency || "").trim().toUpperCase();
+    if (!baseCurrency) return res.status(400).json({ error: "partner_base_currency_missing" });
+
+    const { data: prof, error: profErr } = await supabase
+      .from("profiles")
+      .select("country_code")
+      .eq("id", guard.userId)
+      .maybeSingle();
+    if (profErr) return res.status(500).json({ error: profErr.message || "Erreur lecture profil" });
+
+    const customerCountryCode = String(prof?.country_code || "").trim().toUpperCase() || null;
+    const chargeCurrency = countryToCurrency(customerCountryCode);
+
+    const itemIds = items
+      .map((it) => String(it?.itemId || "").trim())
+      .filter(Boolean);
+    if (itemIds.length === 0) return res.status(400).json({ error: "items_invalid" });
+
+    const { data: dbItems, error: iErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, title, base_price_amount, is_available, is_published")
+      .eq("partner_id", partnerId)
+      .in("id", itemIds);
+    if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture items" });
+
+    const byId = new Map((dbItems || []).map((x) => [x.id, x]));
+    const orderLines = [];
+    let baseTotal = 0;
+
+    for (const it of items) {
+      const id = String(it?.itemId || "").trim();
+      const qty = Math.max(parseInt(it?.quantity, 10) || 1, 1);
+      const row = byId.get(id);
+      if (!row) return res.status(400).json({ error: `item_not_found:${id}` });
+      if (!row.is_published) return res.status(400).json({ error: `item_not_published:${id}` });
+      if (!row.is_available) return res.status(400).json({ error: `item_unavailable:${id}` });
+      const unit = Number(row.base_price_amount);
+      if (!Number.isFinite(unit) || unit < 0) return res.status(400).json({ error: `item_price_invalid:${id}` });
+      const lineTotal = unit * qty;
+      baseTotal += lineTotal;
+      orderLines.push({
+        item_id: row.id,
+        title_snapshot: row.title,
+        unit_base_price_amount: unit,
+        quantity: qty,
+        total_base_amount: lineTotal,
+      });
+    }
+
+    const { amount: chargeTotal, rate } = await fxService.convertMinorAmount({
+      amount: baseTotal,
+      fromCurrency: baseCurrency,
+      toCurrency: chargeCurrency,
+    });
+
+    const fee = await getActiveFeeSettings(chargeCurrency);
+    if (!fee) return res.status(400).json({ error: "fee_settings_missing" });
+
+    const percentFee = Math.round((chargeTotal * Number(fee.percent_bps || 0)) / 10000);
+    const fixedFee = Number(fee.fixed_fee_amount || 0);
+    const platformFee = Math.max(percentFee + fixedFee, 0);
+    const partnerAmount = Math.max(chargeTotal - platformFee, 0);
+
+    const { data: inserted, error: oErr } = await supabase
+      .from("partner_orders")
+      .insert({
+        partner_id: partnerId,
+        customer_user_id: guard.userId,
+        status: "created",
+        delivery_mode: delivery_mode === "partner_delivery" ? "partner_delivery" : "pickup",
+        customer_note: customer_note ? String(customer_note) : null,
+        customer_country_code: customerCountryCode,
+        base_currency: baseCurrency,
+        base_amount_total: baseTotal,
+        charge_currency: chargeCurrency,
+        charge_amount_total: chargeTotal,
+        fx_rate_used: rate,
+        fx_provider: "frankfurter",
+        fx_timestamp: new Date().toISOString(),
+        platform_fee_amount: platformFee,
+        partner_amount: partnerAmount,
+      })
+      .select("id")
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur création commande" });
+
+    const orderId = inserted?.id;
+    if (!orderId) return res.status(500).json({ error: "order_create_failed" });
+
+    const linesPayload = orderLines.map((l) => ({ ...l, order_id: orderId }));
+    const { error: liErr } = await supabase.from("partner_order_items").insert(linesPayload);
+    if (liErr) return res.status(500).json({ error: liErr.message || "Erreur création lignes" });
+
+    return res.json({ success: true, orderId });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
+    if (!['created', 'payment_pending'].includes(String(order.status || ''))) {
+      return res.status(400).json({ error: "order_status_invalid" });
+    }
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, status, payout_status, is_open")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner) return res.status(404).json({ error: "partner_not_found" });
+
+    const isApproved = String(partner.status || "").toLowerCase() === "approved";
+    const payoutComplete = String(partner.payout_status || "").toLowerCase() === "complete";
+    const isOpen = partner.is_open === true;
+    if (!(isApproved && payoutComplete && isOpen)) {
+      return res.status(400).json({ error: "partner_not_commandable" });
+    }
+
+    const currency = String(order.charge_currency || "").toLowerCase();
+    const unitAmount = Number(order.charge_amount_total);
+    if (!currency || !Number.isFinite(unitAmount) || unitAmount <= 0) {
+      return res.status(400).json({ error: "order_amount_invalid" });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency,
+            product_data: { name: "Commande Partenaire — OneKamer" },
+            unit_amount: unitAmount,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: "payment",
+      success_url: `https://onekamer.co/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `https://onekamer.co/paiement-annule`,
+      metadata: { market_order_id: orderId, partner_id: order.partner_id, customer_user_id: guard.userId },
+    });
+
+    await supabase.from("partner_order_payments").insert({
+      order_id: orderId,
+      provider: "stripe",
+      stripe_checkout_session_id: session.id,
+      status: "created",
+    });
+
+    await supabase
+      .from("partner_orders")
+      .update({ status: "payment_pending" })
+      .eq("id", orderId);
+
+    return res.json({ url: session.url });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
 
 // ============================================================
 // 📧 Email - Brevo HTTP API (LAB) + fallback Nodemailer
@@ -750,6 +1059,56 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
       const { userId, packId, planKey, promoCode, eventId, paymentMode } = session.metadata || {};
+
+      // Cas marketplace (Partenaires)
+      const marketOrderId = session?.metadata?.market_order_id;
+      if (marketOrderId) {
+        try {
+          await supabase
+            .from("partner_orders")
+            .update({
+              status: "paid",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", marketOrderId);
+
+          await supabase
+            .from("partner_order_payments")
+            .update({
+              status: "succeeded",
+              stripe_payment_intent_id: session.payment_intent || null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("stripe_checkout_session_id", session.id);
+
+          await logEvent({
+            category: "marketplace",
+            action: "checkout.completed",
+            status: "success",
+            userId: session?.metadata?.customer_user_id || null,
+            context: {
+              market_order_id: marketOrderId,
+              stripe_checkout_session_id: session.id,
+              stripe_payment_intent_id: session.payment_intent || null,
+            },
+          });
+
+          return res.json({ received: true });
+        } catch (e) {
+          await logEvent({
+            category: "marketplace",
+            action: "checkout.completed",
+            status: "error",
+            userId: session?.metadata?.customer_user_id || null,
+            context: {
+              market_order_id: marketOrderId,
+              stripe_checkout_session_id: session.id,
+              error: e?.message || String(e),
+            },
+          });
+          return res.json({ received: true });
+        }
+      }
 
       // Cas 0 : Paiement événement (Checkout mode payment)
       if (eventId && userId && session.mode === "payment") {
