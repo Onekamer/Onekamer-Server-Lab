@@ -1118,7 +1118,7 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   });
 
   try {
-    if (event.type === "account.updated") {
+    if (event.type === "account.updated" || event.type === "v2.core.account.updated") {
       const account = event.data.object;
       const accountId = account?.id ? String(account.id) : null;
       if (accountId) {
