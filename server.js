@@ -633,6 +633,104 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
   }
 });
 
+app.post("/api/market/orders/sync-payment", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { sessionId } = req.body || {};
+    const sid = sessionId ? String(sessionId).trim() : "";
+    if (!sid) return res.status(400).json({ error: "sessionId requis" });
+
+    const { data: paymentRow, error: payErr } = await supabase
+      .from("partner_order_payments")
+      .select("order_id, stripe_checkout_session_id, status")
+      .eq("stripe_checkout_session_id", sid)
+      .maybeSingle();
+    if (payErr) return res.status(500).json({ error: payErr.message || "Erreur lecture payment" });
+    if (!paymentRow?.order_id) return res.status(404).json({ error: "payment_not_found" });
+
+    const orderId = String(paymentRow.order_id);
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, customer_user_id, status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
+
+    const session = await stripe.checkout.sessions.retrieve(sid, {
+      expand: ["payment_intent"],
+    });
+
+    const marketOrderId = session?.metadata?.market_order_id ? String(session.metadata.market_order_id) : null;
+    if (marketOrderId && marketOrderId !== orderId) {
+      return res.status(400).json({ error: "order_session_mismatch" });
+    }
+
+    const paymentStatus = String(session?.payment_status || "").toLowerCase();
+    const isPaid = paymentStatus === "paid";
+    if (!isPaid) {
+      return res.status(400).json({
+        error: "payment_not_paid",
+        payment_status: session?.payment_status || null,
+      });
+    }
+
+    const paymentIntentId = session?.payment_intent
+      ? typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id || null
+      : null;
+
+    await supabase
+      .from("partner_orders")
+      .update({
+        status: "paid",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId);
+
+    await supabase
+      .from("partner_order_payments")
+      .update({
+        status: "succeeded",
+        stripe_payment_intent_id: paymentIntentId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("stripe_checkout_session_id", sid);
+
+    await logEvent({
+      category: "marketplace",
+      action: "checkout.sync",
+      status: "success",
+      userId: guard.userId,
+      context: {
+        market_order_id: orderId,
+        stripe_checkout_session_id: sid,
+        stripe_payment_intent_id: paymentIntentId,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      orderId,
+      payment_status: session?.payment_status || null,
+      stripe_payment_intent_id: paymentIntentId,
+    });
+  } catch (e) {
+    await logEvent({
+      category: "marketplace",
+      action: "checkout.sync",
+      status: "error",
+      context: { error: e?.message || String(e) },
+    });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, res) => {
   try {
     const { partnerId } = req.body || {};
