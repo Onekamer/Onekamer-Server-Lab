@@ -405,7 +405,7 @@ app.get("/api/market/partners", async (req, res) => {
     const { data, error } = await supabase
       .from("partners_market")
       .select(
-        "id, display_name, description, category, country_code, base_currency, status, payout_status, is_open, created_at"
+        "id, display_name, description, category, country_code, base_currency, status, payout_status, is_open, logo_url, phone, whatsapp, address, hours, created_at"
       )
       .order("created_at", { ascending: false });
 
