@@ -610,8 +610,8 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
         },
       ],
       mode: "payment",
-      success_url: `https://onekamer.co/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://onekamer.co/paiement-annule`,
+      success_url: `https://onekamer-front-lab.onrender.com/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `https://onekamer-front-lab.onrender.com/paiement-annule`,
       metadata: { market_order_id: orderId, partner_id: order.partner_id, customer_user_id: guard.userId },
     });
 
