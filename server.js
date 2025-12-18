@@ -307,8 +307,11 @@ app.get("/api/market/fx-rate", async (req, res) => {
 
 function countryToCurrency(countryCode) {
   const cc = String(countryCode || "").trim().toUpperCase();
-  if (!cc) return "USD";
+  if (!cc) return "EUR";
   if (cc === "CA") return "CAD";
+  if (cc === "GB") return "GBP";
+  if (cc === "CH") return "CHF";
+  if (cc === "MA") return "MAD";
   const euroCountries = new Set([
     "AT",
     "BE",
