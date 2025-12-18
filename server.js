@@ -379,6 +379,27 @@ async function requirePartnerOwner({ req, partnerId }) {
   return { ok: true, userId: guard.userId, partner };
 }
 
+async function requireVipOrAdminUser({ req }) {
+  const guard = await requireUserJWT(req);
+  if (!guard.ok) return guard;
+
+  const { data: profile, error } = await supabase
+    .from("profiles")
+    .select("id, plan, role, is_admin")
+    .eq("id", guard.userId)
+    .maybeSingle();
+
+  if (error) return { ok: false, status: 500, error: error.message || "profile_read_failed" };
+  if (!profile) return { ok: false, status: 404, error: "profile_not_found" };
+
+  const plan = String(profile.plan || "free").toLowerCase();
+  const isAdmin = Boolean(profile.is_admin) || String(profile.role || "").toLowerCase() === "admin";
+  const isVip = plan === "vip";
+  if (!isAdmin && !isVip) return { ok: false, status: 403, error: "vip_required" };
+
+  return { ok: true, userId: guard.userId, token: guard.token, profile };
+}
+
 app.get("/api/market/partners", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -399,6 +420,133 @@ app.get("/api/market/partners", async (req, res) => {
     });
 
     return res.json({ partners });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/me", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: partner, error } = await supabase
+      .from("partners_market")
+      .select(
+        "id, owner_user_id, display_name, description, category, status, payout_status, stripe_connect_account_id, is_open, logo_url, phone, whatsapp, address, hours, created_at, updated_at"
+      )
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture boutique" });
+    return res.json({ partner: partner || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireVipOrAdminUser({ req });
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const {
+      display_name,
+      description,
+      category,
+      logo_url,
+      phone,
+      whatsapp,
+      address,
+      hours,
+    } = req.body || {};
+
+    const name = String(display_name || "").trim();
+    const desc = String(description || "").trim();
+    const cat = String(category || "").trim();
+    const logo = String(logo_url || "").trim();
+
+    if (!name) return res.status(400).json({ error: "display_name requis" });
+    if (!desc) return res.status(400).json({ error: "description requise" });
+    if (!cat) return res.status(400).json({ error: "category requise" });
+    if (!logo) return res.status(400).json({ error: "logo_url requis" });
+
+    const { data: existing, error: exErr } = await supabase
+      .from("partners_market")
+      .select("id")
+      .eq("owner_user_id", guard.userId)
+      .maybeSingle();
+    if (exErr) return res.status(500).json({ error: exErr.message || "Erreur lecture boutique" });
+    if (existing?.id) return res.status(409).json({ error: "partner_already_exists" });
+
+    const now = new Date().toISOString();
+    const { data: inserted, error } = await supabase
+      .from("partners_market")
+      .insert({
+        owner_user_id: guard.userId,
+        display_name: name,
+        description: desc,
+        category: cat,
+        status: "pending",
+        payout_status: "incomplete",
+        is_open: false,
+        logo_url: logo,
+        phone: phone ? String(phone).trim() : null,
+        whatsapp: whatsapp ? String(whatsapp).trim() : null,
+        address: address ? String(address).trim() : null,
+        hours: hours ? String(hours).trim() : null,
+        created_at: now,
+        updated_at: now,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur création boutique" });
+    if (!inserted?.id) return res.status(500).json({ error: "partner_create_failed" });
+    return res.json({ success: true, partnerId: inserted.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/market/partners/:partnerId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (patch.display_name !== undefined) update.display_name = String(patch.display_name || "").trim();
+    if (patch.description !== undefined) update.description = String(patch.description || "").trim();
+    if (patch.category !== undefined) update.category = String(patch.category || "").trim();
+    if (patch.logo_url !== undefined) update.logo_url = String(patch.logo_url || "").trim();
+    if (patch.phone !== undefined) update.phone = patch.phone ? String(patch.phone).trim() : null;
+    if (patch.whatsapp !== undefined) update.whatsapp = patch.whatsapp ? String(patch.whatsapp).trim() : null;
+    if (patch.address !== undefined) update.address = patch.address ? String(patch.address).trim() : null;
+    if (patch.hours !== undefined) update.hours = patch.hours ? String(patch.hours).trim() : null;
+
+    if ("display_name" in update && !update.display_name) {
+      return res.status(400).json({ error: "display_name requis" });
+    }
+    if ("description" in update && !update.description) {
+      return res.status(400).json({ error: "description requise" });
+    }
+    if ("category" in update && !update.category) {
+      return res.status(400).json({ error: "category requise" });
+    }
+    if ("logo_url" in update && !update.logo_url) {
+      return res.status(400).json({ error: "logo_url requis" });
+    }
+
+    const { error } = await supabase.from("partners_market").update(update).eq("id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour boutique" });
+    return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
