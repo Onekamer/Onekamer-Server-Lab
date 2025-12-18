@@ -547,7 +547,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total")
+      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
@@ -559,7 +559,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
 
     const { data: partner, error: pErr } = await supabase
       .from("partners_market")
-      .select("id, status, payout_status, is_open")
+      .select("id, status, payout_status, is_open, stripe_connect_account_id")
       .eq("id", order.partner_id)
       .maybeSingle();
     if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
@@ -578,8 +578,27 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
       return res.status(400).json({ error: "order_amount_invalid" });
     }
 
+    const destinationAccount = partner?.stripe_connect_account_id
+      ? String(partner.stripe_connect_account_id)
+      : null;
+    if (!destinationAccount) {
+      return res.status(400).json({ error: "partner_connect_account_missing" });
+    }
+
+    const applicationFeeAmount = Number(order.platform_fee_amount);
+    if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0) {
+      return res.status(400).json({ error: "order_fee_invalid" });
+    }
+    if (applicationFeeAmount > unitAmount) {
+      return res.status(400).json({ error: "order_fee_too_high" });
+    }
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
+      payment_intent_data: {
+        application_fee_amount: applicationFeeAmount,
+        transfer_data: { destination: destinationAccount },
+      },
       line_items: [
         {
           price_data: {
