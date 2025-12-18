@@ -1050,7 +1050,7 @@ app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, 
         .eq("id", partnerId);
     }
 
-    const frontendBase = "https://onekamer-front-lab.onrender.com";
+    const frontendBase = String(process.env.FRONTEND_URL || "https://onekamer-front-lab.onrender.com").replace(/\/$/, "");
     const returnUrl = `${frontendBase}/compte`;
     const refreshUrl = `${frontendBase}/compte`;
 
