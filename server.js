@@ -660,14 +660,65 @@ app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, 
   }
 });
 
-// ============================================================
-// 📧 Email - Brevo HTTP API (LAB) + fallback Nodemailer
-// ============================================================
+app.post("/api/partner/connect/sync-status", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.body || {};
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
 
-const smtpHost = process.env.SMTP_HOST;
-const smtpPort = process.env.SMTP_PORT
-  ? parseInt(process.env.SMTP_PORT, 10)
-  : 587;
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const accountId = auth.partner?.stripe_connect_account_id ? String(auth.partner.stripe_connect_account_id) : null;
+    if (!accountId) return res.status(400).json({ error: "stripe_connect_account_id manquant" });
+
+    const account = await stripe.accounts.retrieve(accountId);
+
+    const detailsSubmitted = account?.details_submitted === true;
+    const chargesEnabled = account?.charges_enabled === true;
+    const payoutsEnabled = account?.payouts_enabled === true;
+    const payoutStatus = detailsSubmitted && chargesEnabled && payoutsEnabled ? "complete" : "incomplete";
+
+    await supabase
+      .from("partners_market")
+      .update({
+        payout_status: payoutStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", partnerId);
+
+    await logEvent({
+      category: "marketplace",
+      action: "connect.status.sync",
+      status: "success",
+      userId: auth.userId,
+      context: {
+        partner_id: partnerId,
+        stripe_connect_account_id: accountId,
+        payout_status: payoutStatus,
+        details_submitted: detailsSubmitted,
+        charges_enabled: chargesEnabled,
+        payouts_enabled: payoutsEnabled,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      payout_status: payoutStatus,
+      details_submitted: detailsSubmitted,
+      charges_enabled: chargesEnabled,
+      payouts_enabled: payoutsEnabled,
+    });
+  } catch (e) {
+    await logEvent({
+      category: "marketplace",
+      action: "connect.status.sync",
+      status: "error",
+      context: { error: e?.message || String(e) },
+    });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 const smtpUser = process.env.SMTP_USER;
 const smtpPass = process.env.SMTP_PASS;
 const fromEmail = process.env.FROM_EMAIL || "no-reply@onekamer.co";
