@@ -33,6 +33,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       "avatars",
       "posts",
       "partenaires",
+      "marketplace_items",
       "annonces",
       "evenements",
       "comments_audio",

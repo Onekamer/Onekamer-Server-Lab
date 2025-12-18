@@ -571,6 +571,145 @@ app.get("/api/market/partners/:partnerId/items", async (req, res) => {
   }
 });
 
+app.get("/api/market/partners/:partnerId/items/manage", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: items, error } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, type, title, description, base_price_amount, is_available, is_published, media, created_at, updated_at")
+      .eq("partner_id", partnerId)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture items" });
+    return res.json({ items: items || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/partners/:partnerId/items", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const payload = req.body || {};
+    const title = String(payload.title || "").trim();
+    const description = payload.description ? String(payload.description).trim() : null;
+    const type = payload.type ? String(payload.type).trim() : "product";
+
+    const basePriceAmount = Number(payload.base_price_amount);
+    if (!title) return res.status(400).json({ error: "title requis" });
+    if (!Number.isFinite(basePriceAmount) || basePriceAmount < 0) {
+      return res.status(400).json({ error: "base_price_amount invalide" });
+    }
+
+    const isAvailable = payload.is_available === false ? false : true;
+    const isPublished = payload.is_published === true;
+    const media = payload.media && typeof payload.media === "object" ? payload.media : null;
+
+    const now = new Date().toISOString();
+    const { data, error } = await supabase
+      .from("partner_items")
+      .insert({
+        partner_id: partnerId,
+        type,
+        title,
+        description,
+        base_price_amount: Math.round(basePriceAmount),
+        is_available: isAvailable,
+        is_published: isPublished,
+        media,
+        created_at: now,
+        updated_at: now,
+      })
+      .select("id")
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message || "Erreur création item" });
+    if (!data?.id) return res.status(500).json({ error: "item_create_failed" });
+    return res.json({ success: true, itemId: data.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/market/partners/:partnerId/items/:itemId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId, itemId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+    if (!itemId) return res.status(400).json({ error: "itemId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const patch = req.body || {};
+    const update = { updated_at: new Date().toISOString() };
+
+    if (patch.title !== undefined) update.title = String(patch.title || "").trim();
+    if (patch.description !== undefined) update.description = patch.description ? String(patch.description).trim() : null;
+    if (patch.type !== undefined) update.type = patch.type ? String(patch.type).trim() : "product";
+    if (patch.base_price_amount !== undefined) {
+      const v = Number(patch.base_price_amount);
+      if (!Number.isFinite(v) || v < 0) return res.status(400).json({ error: "base_price_amount invalide" });
+      update.base_price_amount = Math.round(v);
+    }
+    if (patch.is_available !== undefined) update.is_available = patch.is_available === true;
+    if (patch.is_published !== undefined) update.is_published = patch.is_published === true;
+    if (patch.media !== undefined) update.media = patch.media && typeof patch.media === "object" ? patch.media : null;
+
+    if ("title" in update && !update.title) return res.status(400).json({ error: "title requis" });
+
+    const { data: existing, error: readErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id")
+      .eq("id", itemId)
+      .maybeSingle();
+    if (readErr) return res.status(500).json({ error: readErr.message || "Erreur lecture item" });
+    if (!existing) return res.status(404).json({ error: "item_not_found" });
+    if (String(existing.partner_id) !== String(partnerId)) return res.status(403).json({ error: "forbidden" });
+
+    const { error } = await supabase.from("partner_items").update(update).eq("id", itemId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour item" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/market/partners/:partnerId/items/:itemId", async (req, res) => {
+  try {
+    const { partnerId, itemId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+    if (!itemId) return res.status(400).json({ error: "itemId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: existing, error: readErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id")
+      .eq("id", itemId)
+      .maybeSingle();
+    if (readErr) return res.status(500).json({ error: readErr.message || "Erreur lecture item" });
+    if (!existing) return res.status(404).json({ error: "item_not_found" });
+    if (String(existing.partner_id) !== String(partnerId)) return res.status(403).json({ error: "forbidden" });
+
+    const { error } = await supabase.from("partner_items").delete().eq("id", itemId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur suppression item" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
   try {
     const guard = await requireUserJWT(req);
