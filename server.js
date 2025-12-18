@@ -385,7 +385,7 @@ async function requireVipOrAdminUser({ req }) {
 
   const { data: profile, error } = await supabase
     .from("profiles")
-    .select("id, plan, role, is_admin")
+    .select("id, plan, role, is_admin, country_code")
     .eq("id", guard.userId)
     .maybeSingle();
 
@@ -479,6 +479,9 @@ app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
     if (exErr) return res.status(500).json({ error: exErr.message || "Erreur lecture boutique" });
     if (existing?.id) return res.status(409).json({ error: "partner_already_exists" });
 
+    const profileCountryCode = String(guard.profile?.country_code || "").trim().toUpperCase() || "FR";
+    const baseCurrency = countryToCurrency(profileCountryCode);
+
     const now = new Date().toISOString();
     const { data: inserted, error } = await supabase
       .from("partners_market")
@@ -487,6 +490,8 @@ app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
         display_name: name,
         description: desc,
         category: cat,
+        country_code: profileCountryCode,
+        base_currency: baseCurrency,
         status: "pending",
         payout_status: "incomplete",
         is_open: false,
