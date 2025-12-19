@@ -2756,6 +2756,11 @@ app.get("/api/admin/market/partners/performance", async (req, res) => {
 
     const period = req.query.period ? String(req.query.period).trim().toLowerCase() : "30d";
     const currencyFilter = req.query.currency ? String(req.query.currency).trim().toUpperCase() : "ALL";
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    const includeEmpty =
+      req.query.includeEmpty === true ||
+      req.query.includeEmpty === "true" ||
+      req.query.includeEmpty === "1";
     const limitRaw = req.query.limit;
     const offsetRaw = req.query.offset;
     const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
@@ -2835,7 +2840,19 @@ app.get("/api/admin/market/partners/performance", async (req, res) => {
       (partners || []).forEach((p) => partnerById.set(String(p.id), p));
     }
 
-    const rows = Array.from(statsByKey.values()).map((r) => {
+    let allPartnersById = null;
+    if (includeEmpty) {
+      let pq = supabase.from("partners_market").select("id, display_name, base_currency, created_at");
+      if (search) pq = pq.ilike("display_name", `%${search}%`);
+
+      const { data: allPartners, error: apErr } = await pq.order("created_at", { ascending: false }).limit(2000);
+      if (apErr) return res.status(500).json({ error: apErr.message || "Erreur lecture boutiques" });
+
+      allPartnersById = new Map();
+      (allPartners || []).forEach((p) => allPartnersById.set(String(p.id), p));
+    }
+
+    let rows = Array.from(statsByKey.values()).map((r) => {
       const p = partnerById.get(String(r.partner_id)) || null;
       const avg = r.orders_paid_count > 0 ? Math.round(r.revenue_charge_total_minor / r.orders_paid_count) : 0;
       return {
@@ -2845,6 +2862,50 @@ app.get("/api/admin/market/partners/performance", async (req, res) => {
         partner_base_currency: p?.base_currency || null,
       };
     });
+
+    if (search) {
+      const searchLower = search.toLowerCase();
+      rows = rows.filter((r) => String(r.partner_display_name || "").toLowerCase().includes(searchLower));
+    }
+
+    if (includeEmpty && allPartnersById) {
+      allPartnersById.forEach((p) => {
+        const pid = String(p.id);
+        if (currencyFilter && currencyFilter !== "ALL") {
+          const key = `${pid}::${currencyFilter}`;
+          if (!statsByKey.has(key)) {
+            rows.push({
+              partner_id: pid,
+              currency: currencyFilter,
+              orders_paid_count: 0,
+              revenue_charge_total_minor: 0,
+              last_paid_at: null,
+              avg_basket_minor: 0,
+              partner_display_name: p.display_name || null,
+              partner_base_currency: p.base_currency || null,
+            });
+          }
+          return;
+        }
+
+        const baseCur = p.base_currency ? String(p.base_currency).toUpperCase() : "";
+        const cur = baseCur || "EUR";
+        const key = `${pid}::${cur}`;
+        const exists = rows.some((r) => String(r.partner_id) === pid);
+        if (!exists) {
+          rows.push({
+            partner_id: pid,
+            currency: cur,
+            orders_paid_count: 0,
+            revenue_charge_total_minor: 0,
+            last_paid_at: null,
+            avg_basket_minor: 0,
+            partner_display_name: p.display_name || null,
+            partner_base_currency: p.base_currency || null,
+          });
+        }
+      });
+    }
 
     rows.sort((a, b) => {
       const da = Number(a.revenue_charge_total_minor || 0);
