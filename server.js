@@ -445,6 +445,100 @@ app.get("/api/market/partners/me", async (req, res) => {
   }
 });
 
+app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    let query = supabase
+      .from("partner_orders")
+      .select(
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, customer_country_code, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at"
+      )
+      .eq("partner_id", partnerId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (statusFilter && statusFilter !== "all") {
+      if (statusFilter === "pending") {
+        query = query.in("status", ["created", "payment_pending"]);
+      } else if (statusFilter === "paid") {
+        query = query.eq("status", "paid");
+      } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
+        query = query.in("status", ["canceled", "cancelled"]);
+      } else {
+        query = query.eq("status", statusFilter);
+      }
+    }
+
+    const { data: orders, error: oErr } = await query;
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commandes" });
+
+    const safeOrders = Array.isArray(orders) ? orders : [];
+    const orderIds = safeOrders.map((o) => o.id).filter(Boolean);
+
+    let itemsByOrderId = {};
+    if (orderIds.length > 0) {
+      const { data: items, error: iErr } = await supabase
+        .from("partner_order_items")
+        .select("id, order_id, item_id, title_snapshot, unit_base_price_amount, quantity, total_base_amount")
+        .in("order_id", orderIds)
+        .order("created_at", { ascending: true });
+
+      if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture lignes commande" });
+
+      itemsByOrderId = (items || []).reduce((acc, it) => {
+        const oid = it?.order_id ? String(it.order_id) : null;
+        if (!oid) return acc;
+        if (!acc[oid]) acc[oid] = [];
+        acc[oid].push(it);
+        return acc;
+      }, {});
+    }
+
+    const uniqueCustomerIds = Array.from(
+      new Set(safeOrders.map((o) => (o?.customer_user_id ? String(o.customer_user_id) : null)).filter(Boolean))
+    );
+
+    const emailByUserId = {};
+    if (uniqueCustomerIds.length > 0 && supabase?.auth?.admin?.getUserById) {
+      await Promise.all(
+        uniqueCustomerIds.map(async (uid) => {
+          try {
+            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+            if (uErr) return;
+            const email = String(uData?.user?.email || "").trim();
+            if (email) emailByUserId[uid] = email;
+          } catch {
+            // ignore
+          }
+        })
+      );
+    }
+
+    const enriched = safeOrders.map((o) => {
+      const oid = o?.id ? String(o.id) : null;
+      const uid = o?.customer_user_id ? String(o.customer_user_id) : null;
+      return {
+        ...o,
+        customer_email: uid ? emailByUserId[uid] || null : null,
+        items: oid ? itemsByOrderId[oid] || [] : [],
+      };
+    });
+
+    return res.json({ orders: enriched, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
   try {
     const guard = await requireVipOrAdminUser({ req });
