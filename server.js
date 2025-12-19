@@ -539,6 +539,184 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
   }
 });
 
+app.put("/api/market/cart", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { partnerId, items } = req.body || {};
+    const pid = partnerId ? String(partnerId).trim() : null;
+    if (!pid) return res.status(400).json({ error: "partnerId requis" });
+    if (!Array.isArray(items)) return res.status(400).json({ error: "items requis" });
+
+    const normalizedItems = items
+      .map((it) => ({
+        itemId: it?.itemId ? String(it.itemId).trim() : null,
+        quantity: Math.max(parseInt(it?.quantity, 10) || 1, 1),
+      }))
+      .filter((it) => it.itemId);
+
+    const now = new Date().toISOString();
+
+    const { data: existingCart, error: cReadErr } = await supabase
+      .from("market_carts")
+      .select("id")
+      .eq("user_id", guard.userId)
+      .eq("partner_id", pid)
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (cReadErr) return res.status(500).json({ error: cReadErr.message || "Erreur lecture panier" });
+
+    let cartId = existingCart?.id ? String(existingCart.id) : null;
+    if (!cartId) {
+      const { data: inserted, error: cInsErr } = await supabase
+        .from("market_carts")
+        .insert({ user_id: guard.userId, partner_id: pid, status: "active", created_at: now, updated_at: now })
+        .select("id")
+        .maybeSingle();
+      if (cInsErr) return res.status(500).json({ error: cInsErr.message || "Erreur création panier" });
+      cartId = inserted?.id ? String(inserted.id) : null;
+    } else {
+      const { error: cUpErr } = await supabase
+        .from("market_carts")
+        .update({ updated_at: now })
+        .eq("id", cartId);
+      if (cUpErr) return res.status(500).json({ error: cUpErr.message || "Erreur mise à jour panier" });
+    }
+
+    if (!cartId) return res.status(500).json({ error: "cart_create_failed" });
+
+    const { error: delErr } = await supabase.from("market_cart_items").delete().eq("cart_id", cartId);
+    if (delErr) return res.status(500).json({ error: delErr.message || "Erreur reset items panier" });
+
+    if (normalizedItems.length === 0) {
+      return res.json({ success: true, cartId, items: [] });
+    }
+
+    const itemIds = normalizedItems.map((x) => x.itemId);
+    const { data: dbItems, error: iErr } = await supabase
+      .from("partner_items")
+      .select("id, partner_id, title, base_price_amount")
+      .eq("partner_id", pid)
+      .in("id", itemIds);
+    if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture produits" });
+
+    const byId = new Map((dbItems || []).map((x) => [String(x.id), x]));
+    const rows = [];
+
+    for (const it of normalizedItems) {
+      const row = byId.get(String(it.itemId));
+      if (!row) continue;
+      const priceMinor = Number(row.base_price_amount || 0);
+      rows.push({
+        cart_id: cartId,
+        item_id: row.id,
+        title_snapshot: row.title || null,
+        unit_price_minor: Number.isFinite(priceMinor) ? Math.round(priceMinor) : 0,
+        quantity: it.quantity,
+      });
+    }
+
+    if (rows.length === 0) {
+      return res.json({ success: true, cartId, items: [] });
+    }
+
+    const { error: insErr } = await supabase.from("market_cart_items").insert(rows);
+    if (insErr) return res.status(500).json({ error: insErr.message || "Erreur ajout items panier" });
+
+    return res.json({ success: true, cartId, itemsCount: rows.length });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/:partnerId/abandoned-carts", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const minutes = Math.min(Math.max(parseInt(req.query.minutes, 10) || 60, 5), 4320);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+
+    const { data: carts, error: cErr } = await supabase
+      .from("market_carts")
+      .select("id, user_id, partner_id, status, created_at, updated_at")
+      .eq("partner_id", partnerId)
+      .eq("status", "active")
+      .lt("updated_at", cutoff)
+      .order("updated_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (cErr) return res.status(500).json({ error: cErr.message || "Erreur lecture paniers" });
+
+    const safeCarts = Array.isArray(carts) ? carts : [];
+    const cartIds = safeCarts.map((c) => c.id).filter(Boolean);
+
+    let itemsByCartId = {};
+    if (cartIds.length > 0) {
+      const { data: items, error: iErr } = await supabase
+        .from("market_cart_items")
+        .select("id, cart_id, item_id, title_snapshot, unit_price_minor, quantity")
+        .in("cart_id", cartIds)
+        .order("created_at", { ascending: true });
+      if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture items panier" });
+
+      itemsByCartId = (items || []).reduce((acc, it) => {
+        const cid = it?.cart_id ? String(it.cart_id) : null;
+        if (!cid) return acc;
+        if (!acc[cid]) acc[cid] = [];
+        acc[cid].push(it);
+        return acc;
+      }, {});
+    }
+
+    const uniqueUserIds = Array.from(new Set(safeCarts.map((c) => (c?.user_id ? String(c.user_id) : null)).filter(Boolean)));
+    const emailByUserId = {};
+    if (uniqueUserIds.length > 0 && supabase?.auth?.admin?.getUserById) {
+      await Promise.all(
+        uniqueUserIds.map(async (uid) => {
+          try {
+            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
+            if (uErr) return;
+            const email = String(uData?.user?.email || "").trim();
+            if (email) emailByUserId[uid] = email;
+          } catch {
+            // ignore
+          }
+        })
+      );
+    }
+
+    const enriched = safeCarts.map((c) => {
+      const cid = c?.id ? String(c.id) : null;
+      const uid = c?.user_id ? String(c.user_id) : null;
+      const its = cid ? itemsByCartId[cid] || [] : [];
+      const totalMinor = its.reduce(
+        (sum, it) => sum + Number(it?.unit_price_minor || 0) * Math.max(parseInt(it?.quantity, 10) || 1, 1),
+        0
+      );
+      return {
+        ...c,
+        customer_email: uid ? emailByUserId[uid] || null : null,
+        items: its,
+        total_minor: totalMinor,
+        currency: "EUR",
+      };
+    });
+
+    return res.json({ carts: enriched, cutoff, minutes, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/market/partners", bodyParser.json(), async (req, res) => {
   try {
     const guard = await requireVipOrAdminUser({ req });
