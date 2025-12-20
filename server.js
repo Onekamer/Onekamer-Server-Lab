@@ -3089,6 +3089,146 @@ app.delete("/api/admin/echange/audio/:commentId", async (req, res) => {
   }
 });
 
+app.delete("/api/admin/annonces/:annonceId", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const annonceId = req.params.annonceId;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    const { error: favErr } = await supabase
+      .from("favorites")
+      .delete()
+      .eq("content_type", "annonce")
+      .eq("content_id", annonceId);
+    if (favErr) console.warn("[admin annonces delete] favorites delete warning:", favErr.message);
+
+    const { error: delErr } = await supabase.from("annonces").delete().eq("id", annonceId);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    return res.json({ deleted: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/annonces/:annonceId", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const annonceId = req.params.annonceId;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    const allowedFields = [
+      "titre",
+      "categorie_id",
+      "prix",
+      "devise_id",
+      "pays_id",
+      "ville_id",
+      "telephone",
+      "email",
+      "description",
+      "media_url",
+      "media_type",
+    ];
+
+    allowedFields.forEach((k) => {
+      if (patch[k] !== undefined) update[k] = patch[k];
+    });
+
+    if (Object.keys(update).length === 1) {
+      return res.status(400).json({ error: "nothing_to_update" });
+    }
+
+    const { error } = await supabase.from("annonces").update(update).eq("id", annonceId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour annonce" });
+
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.delete("/api/admin/evenements/:eventId", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const eventId = req.params.eventId;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const { error: favErr } = await supabase
+      .from("favorites")
+      .delete()
+      .eq("content_type", "evenement")
+      .eq("content_id", eventId);
+    if (favErr) console.warn("[admin evenements delete] favorites delete warning:", favErr.message);
+
+    const { error: delErr } = await supabase.from("evenements").delete().eq("id", eventId);
+    if (delErr) return res.status(500).json({ error: delErr.message });
+
+    return res.json({ deleted: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/evenements/:eventId", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const eventId = req.params.eventId;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const patch = req.body || {};
+    const update = {
+      updated_at: new Date().toISOString(),
+    };
+
+    const allowedFields = [
+      "title",
+      "date",
+      "time",
+      "location",
+      "price",
+      "type_id",
+      "telephone",
+      "email",
+      "site_web",
+      "organisateur",
+      "latitude",
+      "longitude",
+      "devise_id",
+      "media_url",
+      "media_type",
+    ];
+
+    allowedFields.forEach((k) => {
+      if (patch[k] !== undefined) update[k] = patch[k];
+    });
+
+    if (Object.keys(update).length === 1) {
+      return res.status(400).json({ error: "nothing_to_update" });
+    }
+
+    const { error } = await supabase.from("evenements").update(update).eq("id", eventId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur mise à jour événement" });
+
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // ============================================================
 // 2bis️⃣ Création de session Stripe - Paiement Évènement (full / deposit)
 // ============================================================
