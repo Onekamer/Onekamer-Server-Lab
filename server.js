@@ -667,6 +667,75 @@ app.get("/api/market/partners/me", async (req, res) => {
   }
 });
 
+// Signaler une boutique (report)
+app.post("/api/market/partners/:partnerId/report", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const { partnerId } = req.params;
+    const { reason, details } = req.body || {};
+    const normalizedReason = typeof reason === "string" ? reason.trim() : "";
+    if (!partnerId || !normalizedReason) return res.status(400).json({ error: "partnerId et reason requis" });
+
+    const { data: existing, error: exErr } = await supabase
+      .from("marketplace_shop_reports")
+      .select("id, status")
+      .eq("shop_id", partnerId)
+      .eq("reporter_id", guard.userId)
+      .eq("status", "open")
+      .maybeSingle();
+    if (exErr) return res.status(500).json({ error: exErr.message || "report_read_failed" });
+    if (existing) return res.json({ id: existing.id, status: existing.status || "open", dedup: true });
+
+    const payload = {
+      shop_id: partnerId,
+      reporter_id: guard.userId,
+      reason: normalizedReason,
+      details: typeof details === "string" ? details.slice(0, 2000) : null,
+      status: "open",
+      created_at: new Date().toISOString(),
+    };
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("marketplace_shop_reports")
+      .insert(payload)
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message || "report_insert_failed" });
+
+    try {
+      await logEvent({
+        category: "marketplace",
+        action: "shop.report.create",
+        status: "success",
+        userId: guard.userId,
+        context: { partner_id: partnerId, reason: normalizedReason },
+      });
+    } catch {}
+
+    try {
+      const { data: admins, error } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("is_admin", true);
+      if (!error && Array.isArray(admins) && admins.length > 0) {
+        const targetUserIds = admins.map((a) => a.id).filter(Boolean);
+        await sendSupabaseLightPush({
+          title: "Nouveau signalement boutique",
+          message: `Un utilisateur a signalé la boutique ${partnerId}`,
+          targetUserIds,
+          data: { type: "market_shop_report", partnerId },
+          url: "/admin/reports",
+        });
+      }
+    } catch {}
+
+    return res.json({ id: inserted?.id || null, status: "open" });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
   try {
     const { partnerId } = req.params;
