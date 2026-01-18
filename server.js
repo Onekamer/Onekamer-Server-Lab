@@ -292,6 +292,17 @@ const supabase = createClient(
 
 const fxService = createFxService({ supabase, fetchImpl: fetch });
 
+// Configuration Stripe (clé publique) pour Elements (LAB)
+app.get("/api/stripe/config", async (req, res) => {
+  try {
+    const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
+    if (!publishableKey) return res.status(500).json({ error: "publishable_key_missing" });
+    return res.json({ publishableKey });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.get("/api/market/fx-rate", async (req, res) => {
   try {
     const from = String(req.query.from || "").trim().toUpperCase();
@@ -2176,6 +2187,54 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   });
 
   try {
+    if (event.type === "payment_intent.succeeded") {
+      const pi = event.data.object;
+      const md = (pi && pi.metadata) ? pi.metadata : {};
+      const userId = md.userId ? String(md.userId) : null;
+      const packId = md.packId ? parseInt(md.packId, 10) : null;
+
+      try {
+        const { error: evtErr } = await supabase
+          .from("stripe_events")
+          .insert({ event_id: event.id });
+        if (evtErr && evtErr.code === "23505") {
+          await logEvent({
+            category: "okcoins",
+            action: "pi.succeeded.duplicate",
+            status: "info",
+            userId: userId || null,
+            context: { event_id: event.id, packId },
+          });
+          return res.json({ received: true });
+        }
+      } catch {}
+
+      if (userId && Number.isFinite(packId)) {
+        try {
+          await supabase.rpc("okc_grant_pack_after_payment", {
+            p_user: userId,
+            p_pack_id: packId,
+            p_status: "paid",
+          });
+          await logEvent({
+            category: "okcoins",
+            action: "pi.succeeded.credit",
+            status: "success",
+            userId,
+            context: { packId },
+          });
+        } catch (e) {
+          await logEvent({
+            category: "okcoins",
+            action: "pi.succeeded.credit",
+            status: "error",
+            userId: userId || null,
+            context: { packId, error: e?.message || String(e) },
+          });
+        }
+      }
+      return res.json({ received: true });
+    }
     if (event.type === "account.updated" || event.type === "v2.core.account.updated") {
       const account = event.data.object;
       const accountId = account?.id ? String(account.id) : null;
@@ -2912,6 +2971,38 @@ app.post("/api/groups/:groupId/call/end", bodyParser.json(), async (req, res) =>
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// PaymentIntent Elements pour OK COINS (LAB)
+app.post("/api/okcoins/intent", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { packId } = req.body || {};
+    if (!packId) return res.status(400).json({ error: "packId requis" });
+
+    const { data: pack, error: packErr } = await supabase
+      .from("okcoins_packs")
+      .select("price_eur, is_active")
+      .eq("id", packId)
+      .maybeSingle();
+    if (packErr) return res.status(500).json({ error: packErr.message || "pack_read_failed" });
+    if (!pack || pack.is_active === false) return res.status(404).json({ error: "pack_not_found" });
+
+    const amount = Math.max(1, Math.round(Number(pack.price_eur || 0) * 100));
+
+    const intent = await stripe.paymentIntents.create({
+      amount,
+      currency: "eur",
+      automatic_payment_methods: { enabled: true },
+      metadata: { userId: guard.userId, packId: String(packId) },
+    });
+
+    return res.json({ clientSecret: intent.client_secret });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
 
 // ============================================================
 // 🛡️ Admin - Modération Échange communautaire
