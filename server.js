@@ -1672,6 +1672,34 @@ app.post("/api/market/orders/sync-payment", bodyParser.json(), async (req, res) 
       })
       .eq("stripe_checkout_session_id", sid);
 
+    try {
+      const { data: conv } = await supabase
+        .from("marketplace_order_conversations")
+        .select("id")
+        .eq("order_id", orderId)
+        .maybeSingle();
+      if (!conv) {
+        const { data: ordRow } = await supabase
+          .from("partner_orders")
+          .select("id, partner_id, customer_user_id")
+          .eq("id", orderId)
+          .maybeSingle();
+        const { data: partnerRow } = await supabase
+          .from("partners_market")
+          .select("id, owner_user_id")
+          .eq("id", ordRow?.partner_id)
+          .maybeSingle();
+        if (ordRow?.id && partnerRow?.owner_user_id) {
+          await supabase.from("marketplace_order_conversations").insert({
+            order_id: orderId,
+            buyer_user_id: ordRow.customer_user_id,
+            seller_user_id: partnerRow.owner_user_id,
+            created_at: new Date().toISOString(),
+          });
+        }
+      }
+    } catch {}
+
     await logEvent({
       category: "marketplace",
       action: "checkout.sync",
@@ -1697,6 +1725,281 @@ app.post("/api/market/orders/sync-payment", bodyParser.json(), async (req, res) 
       status: "error",
       context: { error: e?.message || String(e) },
     });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/orders", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    let query = supabase
+      .from("partner_orders")
+      .select(
+        "id, partner_id, customer_user_id, status, delivery_mode, base_currency, base_amount_total, charge_currency, charge_amount_total, created_at, updated_at"
+      )
+      .eq("customer_user_id", guard.userId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (statusFilter && statusFilter !== "all") {
+      if (statusFilter === "pending") {
+        query = query.in("status", ["created", "payment_pending"]);
+      } else if (statusFilter === "paid") {
+        query = query.eq("status", "paid");
+      } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
+        query = query.in("status", ["canceled", "cancelled"]);
+      } else {
+        query = query.eq("status", statusFilter);
+      }
+    }
+
+    const { data: orders, error: oErr } = await query;
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commandes" });
+
+    const safeOrders = Array.isArray(orders) ? orders : [];
+    const orderIds = safeOrders.map((o) => o.id).filter(Boolean);
+
+    let itemsByOrderId = {};
+    if (orderIds.length > 0) {
+      const { data: items, error: iErr } = await supabase
+        .from("partner_order_items")
+        .select("id, order_id, item_id, title_snapshot, unit_base_price_amount, quantity, total_base_amount")
+        .in("order_id", orderIds)
+        .order("created_at", { ascending: true });
+
+      if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture lignes commande" });
+
+      itemsByOrderId = (items || []).reduce((acc, it) => {
+        const oid = it?.order_id ? String(it.order_id) : null;
+        if (!oid) return acc;
+        if (!acc[oid]) acc[oid] = [];
+        acc[oid].push(it);
+        return acc;
+      }, {});
+    }
+
+    const enriched = safeOrders.map((o) => {
+      const oid = o?.id ? String(o.id) : null;
+      return {
+        ...o,
+        items: oid ? itemsByOrderId[oid] || [] : [],
+      };
+    });
+
+    return res.json({ orders: enriched, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/orders/:orderId", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select(
+        "id, partner_id, customer_user_id, status, delivery_mode, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at"
+      )
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, owner_user_id, display_name")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+
+    const sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    const isBuyer = String(order.customer_user_id) === String(guard.userId);
+    const isSeller = sellerId && sellerId === String(guard.userId);
+    if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
+
+    const { data: items, error: iErr } = await supabase
+      .from("partner_order_items")
+      .select("id, order_id, item_id, title_snapshot, unit_base_price_amount, quantity, total_base_amount")
+      .eq("order_id", orderId)
+      .order("created_at", { ascending: true });
+    if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture lignes commande" });
+
+    const { data: conv } = await supabase
+      .from("marketplace_order_conversations")
+      .select("id")
+      .eq("order_id", orderId)
+      .maybeSingle();
+
+    return res.json({
+      order: { ...order, partner_display_name: partner?.display_name || null },
+      items: Array.isArray(items) ? items : [],
+      conversationId: conv?.id || null,
+      role: isBuyer ? "buyer" : "seller",
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/orders/:orderId/messages", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, owner_user_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+
+    const sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    const isBuyer = String(order.customer_user_id) === String(guard.userId);
+    const isSeller = sellerId && sellerId === String(guard.userId);
+    if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const { data: conv } = await supabase
+      .from("marketplace_order_conversations")
+      .select("id")
+      .eq("order_id", orderId)
+      .maybeSingle();
+
+    if (!conv?.id) {
+      return res.json({ messages: [], limit, offset, conversationId: null });
+    }
+
+    const { data: messages, error: mErr } = await supabase
+      .from("marketplace_order_messages")
+      .select("id, conversation_id, sender_id, content, created_at")
+      .eq("conversation_id", conv.id)
+      .order("created_at", { ascending: true })
+      .range(offset, offset + limit - 1);
+    if (mErr) return res.status(500).json({ error: mErr.message || "Erreur lecture messages" });
+
+    return res.json({ messages: Array.isArray(messages) ? messages : [], limit, offset, conversationId: conv.id });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    const { content } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+    const text = typeof content === "string" ? content.trim() : "";
+    if (!text) return res.status(400).json({ error: "content requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const statusNorm = String(order.status || "").toLowerCase();
+    if (["created", "payment_pending", "canceled", "cancelled"].includes(statusNorm)) {
+      return res.status(400).json({ error: "order_not_paid" });
+    }
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, owner_user_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+
+    const sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    const isBuyer = String(order.customer_user_id) === String(guard.userId);
+    const isSeller = sellerId && sellerId === String(guard.userId);
+    if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
+
+    let convId = null;
+    try {
+      const { data: conv } = await supabase
+        .from("marketplace_order_conversations")
+        .select("id")
+        .eq("order_id", orderId)
+        .maybeSingle();
+      if (conv?.id) {
+        convId = conv.id;
+      } else {
+        const { data: inserted, error: insConvErr } = await supabase
+          .from("marketplace_order_conversations")
+          .insert({
+            order_id: orderId,
+            buyer_user_id: order.customer_user_id,
+            seller_user_id: partner.owner_user_id,
+            created_at: new Date().toISOString(),
+          })
+          .select("id")
+          .maybeSingle();
+        if (insConvErr) return res.status(500).json({ error: insConvErr.message || "Erreur création conversation" });
+        convId = inserted?.id || null;
+      }
+    } catch (e) {
+      return res.status(500).json({ error: e?.message || "Erreur conversation" });
+    }
+
+    if (!convId) return res.status(500).json({ error: "conversation_unavailable" });
+
+    const safeText = text.slice(0, 2000);
+    const { data: msg, error: mErr } = await supabase
+      .from("marketplace_order_messages")
+      .insert({
+        conversation_id: convId,
+        sender_id: guard.userId,
+        content: safeText,
+        created_at: new Date().toISOString(),
+      })
+      .select("id")
+      .maybeSingle();
+    if (mErr) return res.status(500).json({ error: mErr.message || "Erreur envoi message" });
+
+    try {
+      const recipientId = isBuyer ? sellerId : String(order.customer_user_id);
+      if (recipientId) {
+        await sendSupabaseLightPush({
+          title: "Nouveau message commande",
+          message: safeText,
+          targetUserIds: [recipientId],
+          data: { type: "market_order_message", orderId },
+          url: `/market/orders/${orderId}`,
+        });
+      }
+    } catch {}
+
+    return res.json({ success: true, messageId: msg?.id || null, conversationId: convId });
+  } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
 });
@@ -2374,6 +2677,34 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
               updated_at: new Date().toISOString(),
             })
             .eq("stripe_checkout_session_id", session.id);
+
+          try {
+            const { data: conv } = await supabase
+              .from("marketplace_order_conversations")
+              .select("id")
+              .eq("order_id", marketOrderId)
+              .maybeSingle();
+            if (!conv) {
+              const { data: ordRow } = await supabase
+                .from("partner_orders")
+                .select("id, partner_id, customer_user_id")
+                .eq("id", marketOrderId)
+                .maybeSingle();
+              const { data: partnerRow } = await supabase
+                .from("partners_market")
+                .select("id, owner_user_id")
+                .eq("id", ordRow?.partner_id)
+                .maybeSingle();
+              if (ordRow?.id && partnerRow?.owner_user_id) {
+                await supabase.from("marketplace_order_conversations").insert({
+                  order_id: marketOrderId,
+                  buyer_user_id: ordRow.customer_user_id,
+                  seller_user_id: partnerRow.owner_user_id,
+                  created_at: new Date().toISOString(),
+                });
+              }
+            }
+          } catch {}
 
           await logEvent({
             category: "marketplace",
