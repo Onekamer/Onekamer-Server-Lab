@@ -113,6 +113,7 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
     const rawStatus = String(order.status || '').toLowerCase();
     if (rawStatus === 'paid') return res.status(400).json({ error: "order_already_paid" });
+    if (rawStatus === 'cancelled' || rawStatus === 'canceled') return res.status(400).json({ error: "order_cancelled" });
 
     // 1) Réutiliser une session Stripe ouverte si disponible
     let lastSessionId = null;
@@ -149,12 +150,6 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
     if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
     if (!partner) return res.status(404).json({ error: "partner_not_found" });
 
-    const isApproved = String(partner.status || "").toLowerCase() === "approved";
-    const payoutComplete = String(partner.payout_status || "").toLowerCase() === "complete";
-    const isOpen = partner.is_open === true;
-    if (!(isApproved && payoutComplete && isOpen)) {
-      return res.status(400).json({ error: "partner_not_commandable" });
-    }
 
     const currency = String(order.charge_currency || "").toLowerCase();
     const unitAmount = Number(order.charge_amount_total);
@@ -169,9 +164,9 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
       return res.status(400).json({ error: "partner_connect_account_missing" });
     }
 
-    const applicationFeeAmount = Number(order.platform_fee_amount);
+    let applicationFeeAmount = Number(order.platform_fee_amount);
     if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0) {
-      return res.status(400).json({ error: "order_fee_invalid" });
+      applicationFeeAmount = 0;
     }
     if (applicationFeeAmount > unitAmount) {
       return res.status(400).json({ error: "order_fee_too_high" });
@@ -244,7 +239,7 @@ app.post("/api/market/orders/:orderId/cancel", async (req, res) => {
 
     const { error } = await supabase
       .from("partner_orders")
-      .update({ status: "cancelled", updated_at: new Date().toISOString() })
+      .update({ status: "cancelled", fulfillment_status: "completed", fulfillment_updated_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", orderId);
     if (error) return res.status(500).json({ error: error.message || "Erreur annulation" });
 
