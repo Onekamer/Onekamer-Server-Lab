@@ -1811,7 +1811,7 @@ app.get("/api/market/orders", async (req, res) => {
     let query = supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, base_currency, base_amount_total, charge_currency, charge_amount_total, created_at, updated_at"
+        "id, partner_id, customer_user_id, status, delivery_mode, fulfillment_status, base_currency, base_amount_total, charge_currency, charge_amount_total, created_at, updated_at"
       )
       .eq("customer_user_id", guard.userId)
       .order("created_at", { ascending: false })
