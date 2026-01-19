@@ -1517,7 +1517,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, status, charge_currency, charge_amount_total, platform_fee_amount")
+      .select("id, partner_id, customer_user_id, status, delivery_mode, charge_currency, charge_amount_total, platform_fee_amount")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
@@ -1563,8 +1563,31 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
       return res.status(400).json({ error: "order_fee_too_high" });
     }
 
+    const deliveryMode = String(order.delivery_mode || "").toLowerCase();
+    const collectShipping = deliveryMode !== "pickup";
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
+      billing_address_collection: "required",
+      shipping_address_collection: collectShipping ? { allowed_countries: ["FR", "CM"] } : undefined,
+      phone_number_collection: { enabled: true },
+      customer_creation: "always",
+      custom_fields: [
+        {
+          key: "first_name",
+          label: { type: "custom", custom: "Prénom" },
+          type: "text",
+          text: { default_value: "", maximum_length: 100 },
+          optional: false,
+        },
+        {
+          key: "last_name",
+          label: { type: "custom", custom: "Nom" },
+          type: "text",
+          text: { default_value: "", maximum_length: 100 },
+          optional: false,
+        },
+      ],
       payment_intent_data: {
         application_fee_amount: applicationFeeAmount,
         transfer_data: { destination: destinationAccount },
@@ -1648,6 +1671,38 @@ app.post("/api/market/orders/sync-payment", bodyParser.json(), async (req, res) 
         payment_status: session?.payment_status || null,
       });
     }
+
+    // Map contact + address from session
+    const cfArray = Array.isArray(session?.custom_fields) ? session.custom_fields : [];
+    const cfMap = Object.fromEntries(
+      cfArray
+        .filter((f) => f && f.key)
+        .map((f) => [String(f.key), (f.text && f.text.value) ? String(f.text.value) : null])
+    );
+    const fullName = session?.shipping_details?.name || session?.customer_details?.name || "";
+    const parts = String(fullName).trim().split(/\s+/);
+    const fallbackFirst = parts.length > 1 ? parts.slice(0, -1).join(" ") : parts[0] || null;
+    const fallbackLast = parts.length > 1 ? parts[parts.length - 1] : null;
+    const firstName = (cfMap.first_name || null) || fallbackFirst;
+    const lastName = (cfMap.last_name || null) || fallbackLast;
+    const address = session?.shipping_details?.address || session?.customer_details?.address || null;
+    const phone = session?.customer_details?.phone || session?.shipping_details?.phone || null;
+
+    await supabase
+      .from("partner_orders")
+      .update({
+        customer_first_name: firstName || null,
+        customer_last_name: lastName || null,
+        customer_phone: phone || null,
+        customer_address_line1: address?.line1 || null,
+        customer_address_line2: address?.line2 || null,
+        customer_address_postal_code: address?.postal_code || null,
+        customer_address_city: address?.city || null,
+        customer_address_country: address?.country || null,
+        customer_country_code: address?.country || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId);
 
     const paymentIntentId = session?.payment_intent
       ? typeof session.payment_intent === "string"
@@ -1809,7 +1864,7 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at"
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at, customer_first_name, customer_last_name, customer_phone, customer_address_line1, customer_address_line2, customer_address_postal_code, customer_address_city, customer_address_country, customer_country_code"
       )
       .eq("id", orderId)
       .maybeSingle();
@@ -2824,6 +2879,40 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
                 });
               }
             }
+          } catch {}
+
+          // Save contact + address snapshot from Checkout Session
+          try {
+            const cfArray = Array.isArray(session?.custom_fields) ? session.custom_fields : [];
+            const cfMap = Object.fromEntries(
+              cfArray
+                .filter((f) => f && f.key)
+                .map((f) => [String(f.key), (f.text && f.text.value) ? String(f.text.value) : null])
+            );
+            const fullName = session?.shipping_details?.name || session?.customer_details?.name || "";
+            const parts = String(fullName).trim().split(/\s+/);
+            const fallbackFirst = parts.length > 1 ? parts.slice(0, -1).join(" ") : parts[0] || null;
+            const fallbackLast = parts.length > 1 ? parts[parts.length - 1] : null;
+            const firstName = (cfMap.first_name || null) || fallbackFirst;
+            const lastName = (cfMap.last_name || null) || fallbackLast;
+            const address = session?.shipping_details?.address || session?.customer_details?.address || null;
+            const phone = session?.customer_details?.phone || session?.shipping_details?.phone || null;
+
+            await supabase
+              .from("partner_orders")
+              .update({
+                customer_first_name: firstName || null,
+                customer_last_name: lastName || null,
+                customer_phone: phone || null,
+                customer_address_line1: address?.line1 || null,
+                customer_address_line2: address?.line2 || null,
+                customer_address_postal_code: address?.postal_code || null,
+                customer_address_city: address?.city || null,
+                customer_address_country: address?.country || null,
+                customer_country_code: address?.country || null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", marketOrderId);
           } catch {}
 
           await logEvent({
