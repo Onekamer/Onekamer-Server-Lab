@@ -1809,7 +1809,7 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at"
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at"
       )
       .eq("id", orderId)
       .maybeSingle();
@@ -1827,6 +1827,14 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const isBuyer = String(order.customer_user_id) === String(guard.userId);
     const isSeller = sellerId && sellerId === String(guard.userId);
     if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
+
+    let customerEmail = null;
+    if (isSeller && order?.customer_user_id && supabase?.auth?.admin?.getUserById) {
+      try {
+        const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(String(order.customer_user_id));
+        if (!uErr) customerEmail = (uData?.user?.email || "").trim() || null;
+      } catch {}
+    }
 
     const { data: items, error: iErr } = await supabase
       .from("partner_order_items")
@@ -1846,7 +1854,119 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
       items: Array.isArray(items) ? items : [],
       conversationId: conv?.id || null,
       role: isBuyer ? "buyer" : "seller",
+      customer_email: customerEmail,
     });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Mettre à jour le statut d'exécution (vendeur)
+app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    const { status } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const next = String(status || "").toLowerCase();
+    const allowed = ["preparing", "shipping", "delivered"];
+    if (!allowed.includes(next)) return res.status(400).json({ error: "invalid_status" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, fulfillment_status, fulfillment_updated_at")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { data: partner, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, owner_user_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+    if (!partner || String(partner.owner_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
+
+    const { data: upd, error: uErr } = await supabase
+      .from("partner_orders")
+      .update({ fulfillment_status: next, updated_at: new Date().toISOString() })
+      .eq("id", orderId)
+      .select("id, fulfillment_status, fulfillment_updated_at")
+      .maybeSingle();
+    if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour" });
+
+    try {
+      await sendSupabaseLightPush({
+        title: "Mise à jour commande",
+        message: `Statut: ${next}`,
+        targetUserIds: [String(order.customer_user_id)],
+        data: { type: "market_order_fulfillment_update", orderId },
+        url: `/market/orders/${orderId}`,
+      });
+    } catch {}
+
+    return res.json({ order: upd });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Confirmation de réception (acheteur)
+app.post("/api/market/orders/:orderId/confirm-received", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, fulfillment_status, buyer_received_at")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (String(order.customer_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
+
+    const f = String(order.fulfillment_status || "").toLowerCase();
+    if (f !== "delivered") return res.status(400).json({ error: "not_delivered" });
+
+    if (!order.buyer_received_at) {
+      const { error: uErr } = await supabase
+        .from("partner_orders")
+        .update({ buyer_received_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq("id", orderId);
+      if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour" });
+    }
+
+    let sellerId = null;
+    try {
+      const { data: partner } = await supabase
+        .from("partners_market")
+        .select("id, owner_user_id")
+        .eq("id", order.partner_id)
+        .maybeSingle();
+      sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    } catch {}
+
+    if (sellerId) {
+      try {
+        await sendSupabaseLightPush({
+          title: "Commande reçue",
+          message: "L'acheteur a confirmé la réception.",
+          targetUserIds: [sellerId],
+          data: { type: "market_order_received_confirmed", orderId },
+          url: `/market/orders/${orderId}`,
+        });
+      } catch {}
+    }
+
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
