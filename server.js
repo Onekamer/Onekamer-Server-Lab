@@ -774,6 +774,21 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
 
     const safeOrders = Array.isArray(orders) ? orders : [];
     const orderIds = safeOrders.map((o) => o.id).filter(Boolean);
+    const partnerIds = [...new Set(safeOrders.map((o) => (o?.partner_id ? String(o.partner_id) : null)).filter(Boolean))];
+
+    let partnerNameById = {};
+    if (partnerIds.length > 0) {
+      const { data: partners, error: pErr } = await supabase
+        .from("partners_market")
+        .select("id, display_name")
+        .in("id", partnerIds);
+      if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaires" });
+      partnerNameById = (partners || []).reduce((acc, p) => {
+        const pid = p?.id ? String(p.id) : null;
+        if (pid) acc[pid] = p?.display_name || null;
+        return acc;
+      }, {});
+    }
 
     let itemsByOrderId = {};
     if (orderIds.length > 0) {
@@ -1844,6 +1859,7 @@ app.get("/api/market/orders", async (req, res) => {
       return {
         ...o,
         items: oid ? itemsByOrderId[oid] || [] : [],
+        partner_display_name: o?.partner_id ? (partnerNameById[String(o.partner_id)] || null) : null,
       };
     });
 
