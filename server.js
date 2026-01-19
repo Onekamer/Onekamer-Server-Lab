@@ -1692,8 +1692,8 @@ app.post("/api/market/orders/sync-payment", bodyParser.json(), async (req, res) 
         if (ordRow?.id && partnerRow?.owner_user_id) {
           await supabase.from("marketplace_order_conversations").insert({
             order_id: orderId,
-            buyer_user_id: ordRow.customer_user_id,
-            seller_user_id: partnerRow.owner_user_id,
+            buyer_id: ordRow.customer_user_id,
+            seller_id: partnerRow.owner_user_id,
             created_at: new Date().toISOString(),
           });
         }
@@ -1957,8 +1957,8 @@ app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, 
           .from("marketplace_order_conversations")
           .insert({
             order_id: orderId,
-            buyer_user_id: order.customer_user_id,
-            seller_user_id: partner.owner_user_id,
+            buyer_id: order.customer_user_id,
+            seller_id: partner.owner_user_id,
             created_at: new Date().toISOString(),
           })
           .select("id")
@@ -2698,8 +2698,8 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
               if (ordRow?.id && partnerRow?.owner_user_id) {
                 await supabase.from("marketplace_order_conversations").insert({
                   order_id: marketOrderId,
-                  buyer_user_id: ordRow.customer_user_id,
-                  seller_user_id: partnerRow.owner_user_id,
+                  buyer_id: ordRow.customer_user_id,
+                  seller_id: partnerRow.owner_user_id,
                   created_at: new Date().toISOString(),
                 });
               }
