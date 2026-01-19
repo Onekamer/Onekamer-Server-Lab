@@ -1895,7 +1895,7 @@ app.get("/api/market/orders/:orderId/messages", async (req, res) => {
 
     const { data: messages, error: mErr } = await supabase
       .from("marketplace_order_messages")
-      .select("id, conversation_id, sender_id, content, created_at")
+      .select("id, conversation_id, sender_id:author_id, content:body, created_at")
       .eq("conversation_id", conv.id)
       .order("created_at", { ascending: true })
       .range(offset, offset + limit - 1);
@@ -1977,8 +1977,8 @@ app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, 
       .from("marketplace_order_messages")
       .insert({
         conversation_id: convId,
-        sender_id: guard.userId,
-        content: safeText,
+        author_id: guard.userId,
+        body: safeText,
         created_at: new Date().toISOString(),
       })
       .select("id")
