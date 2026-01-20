@@ -1155,24 +1155,10 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
       new Set(safeOrders.map((o) => (o?.customer_user_id ? String(o.customer_user_id) : null)).filter(Boolean))
     );
 
-    // Construire un alias RGPD: username du profil, sinon #<6 premiers chars id>
     const aliasByUserId = {};
     if (uniqueCustomerIds.length > 0) {
-      try {
-        const { data: profs } = await supabase
-          .from("profiles")
-          .select("id, username")
-          .in("id", uniqueCustomerIds);
-        (profs || []).forEach((p) => {
-          const uid = p?.id ? String(p.id) : null;
-          if (!uid) return;
-          const uname = String(p?.username || "").trim();
-          aliasByUserId[uid] = uname || `#${uid.slice(0, 6)}`;
-        });
-      } catch {}
-      // Fallback pour IDs non trouvés
       uniqueCustomerIds.forEach((uid) => {
-        if (!aliasByUserId[uid]) aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
+        aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
       });
     }
 
@@ -1373,23 +1359,10 @@ app.get("/api/market/partners/:partnerId/abandoned-carts", async (req, res) => {
     }
 
     const uniqueUserIds = Array.from(new Set(safeCarts.map((c) => (c?.user_id ? String(c.user_id) : null)).filter(Boolean)));
-    // Construire alias RGPD pour les paniers abandonnés
     const aliasByUserId = {};
     if (uniqueUserIds.length > 0) {
-      try {
-        const { data: profs } = await supabase
-          .from("profiles")
-          .select("id, username")
-          .in("id", uniqueUserIds);
-        (profs || []).forEach((p) => {
-          const uid = p?.id ? String(p.id) : null;
-          if (!uid) return;
-          const uname = String(p?.username || "").trim();
-          aliasByUserId[uid] = uname || `#${uid.slice(0, 6)}`;
-        });
-      } catch {}
       uniqueUserIds.forEach((uid) => {
-        if (!aliasByUserId[uid]) aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
+        aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
       });
     }
 
@@ -2314,20 +2287,11 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const isSeller = sellerId && sellerId === String(guard.userId);
     if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
 
-    // Construire un alias RGPD: username du profil, sinon #<6 premiers chars id>
     let customerAlias = null;
-    try {
-      if (order?.customer_user_id) {
-        const { data: prof } = await supabase
-          .from("profiles")
-          .select("id, username")
-          .eq("id", String(order.customer_user_id))
-          .maybeSingle();
-        const uid = String(order.customer_user_id);
-        const uname = String(prof?.username || "").trim();
-        customerAlias = uname || `#${uid.slice(0, 6)}`;
-      }
-    } catch {}
+    if (order?.customer_user_id) {
+      const uid = String(order.customer_user_id);
+      customerAlias = `#${uid.slice(0, 6)}`;
+    }
 
     const { data: items, error: iErr } = await supabase
       .from("partner_order_items")
