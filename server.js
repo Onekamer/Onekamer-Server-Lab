@@ -207,7 +207,7 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
     await supabase
       .from("partner_orders")
-      .update({ status: "payment_pending", updated_at: new Date().toISOString() })
+      .update({ status: "pending", updated_at: new Date().toISOString() })
       .eq("id", orderId);
 
     return res.json({ url: session.url });
@@ -320,6 +320,7 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
     const rawStatus = String(order.status || '').toLowerCase();
     if (rawStatus === 'paid') return res.status(400).json({ error: "order_already_paid" });
+    if (rawStatus === 'cancelled' || rawStatus === 'canceled') return res.status(400).json({ error: "order_cancelled" });
 
     // 1) Réutiliser une session Stripe ouverte si disponible
     let lastSessionId = null;
@@ -419,7 +420,7 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
     await supabase
       .from("partner_orders")
-      .update({ status: "payment_pending", updated_at: new Date().toISOString() })
+      .update({ status: "pending", updated_at: new Date().toISOString() })
       .eq("id", orderId);
 
     return res.json({ url: session.url });
@@ -1080,7 +1081,7 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
 
     if (statusFilter && statusFilter !== "all") {
       if (statusFilter === "pending") {
-        query = query.in("status", ["created", "payment_pending"]);
+        query = query.eq("status", "pending");
       } else if (statusFilter === "paid") {
         query = query.eq("status", "paid");
       } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
@@ -1813,7 +1814,7 @@ app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
       .insert({
         partner_id: partnerId,
         customer_user_id: guard.userId,
-        status: "created",
+        status: "pending",
         delivery_mode: delivery_mode === "partner_delivery" ? "partner_delivery" : "pickup",
         customer_note: customer_note ? String(customer_note) : null,
         customer_country_code: customerCountryCode,
@@ -1860,7 +1861,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
     if (!order) return res.status(404).json({ error: "order_not_found" });
     if (order.customer_user_id !== guard.userId) return res.status(403).json({ error: "forbidden" });
-    if (!['created', 'payment_pending'].includes(String(order.status || ''))) {
+    if (String(order.status || '').toLowerCase() !== 'pending') {
       return res.status(400).json({ error: "order_status_invalid" });
     }
 
@@ -1954,7 +1955,7 @@ app.post("/api/market/orders/:orderId/checkout", bodyParser.json(), async (req, 
 
     await supabase
       .from("partner_orders")
-      .update({ status: "payment_pending" })
+      .update({ status: "pending" })
       .eq("id", orderId);
 
     return res.json({ url: session.url });
@@ -2141,7 +2142,7 @@ app.get("/api/market/orders", async (req, res) => {
 
     if (statusFilter && statusFilter !== "all") {
       if (statusFilter === "pending") {
-        query = query.in("status", ["created", "payment_pending"]);
+        query = query.eq("status", "pending");
       } else if (statusFilter === "paid") {
         query = query.eq("status", "paid");
       } else if (statusFilter === "canceled" || statusFilter === "cancelled") {
@@ -2461,7 +2462,7 @@ app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, 
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
     const statusNorm = String(order.status || "").toLowerCase();
-    if (["created", "payment_pending", "canceled", "cancelled"].includes(statusNorm)) {
+    if (["pending", "canceled", "cancelled"].includes(statusNorm)) {
       return res.status(400).json({ error: "order_not_paid" });
     }
 
