@@ -1155,20 +1155,25 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
       new Set(safeOrders.map((o) => (o?.customer_user_id ? String(o.customer_user_id) : null)).filter(Boolean))
     );
 
-    const emailByUserId = {};
-    if (uniqueCustomerIds.length > 0 && supabase?.auth?.admin?.getUserById) {
-      await Promise.all(
-        uniqueCustomerIds.map(async (uid) => {
-          try {
-            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
-            if (uErr) return;
-            const email = String(uData?.user?.email || "").trim();
-            if (email) emailByUserId[uid] = email;
-          } catch {
-            // ignore
-          }
-        })
-      );
+    // Construire un alias RGPD: username du profil, sinon #<6 premiers chars id>
+    const aliasByUserId = {};
+    if (uniqueCustomerIds.length > 0) {
+      try {
+        const { data: profs } = await supabase
+          .from("profiles")
+          .select("id, username")
+          .in("id", uniqueCustomerIds);
+        (profs || []).forEach((p) => {
+          const uid = p?.id ? String(p.id) : null;
+          if (!uid) return;
+          const uname = String(p?.username || "").trim();
+          aliasByUserId[uid] = uname || `#${uid.slice(0, 6)}`;
+        });
+      } catch {}
+      // Fallback pour IDs non trouvés
+      uniqueCustomerIds.forEach((uid) => {
+        if (!aliasByUserId[uid]) aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
+      });
     }
 
     const enriched = safeOrders.map((o) => {
@@ -1179,7 +1184,7 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
       return {
         ...o,
         fulfillment_status: f,
-        customer_email: uid ? emailByUserId[uid] || null : null,
+        customer_alias: uid ? aliasByUserId[uid] || `#${uid.slice(0, 6)}` : null,
         items: oid ? itemsByOrderId[oid] || [] : [],
       };
     });
@@ -1368,20 +1373,24 @@ app.get("/api/market/partners/:partnerId/abandoned-carts", async (req, res) => {
     }
 
     const uniqueUserIds = Array.from(new Set(safeCarts.map((c) => (c?.user_id ? String(c.user_id) : null)).filter(Boolean)));
-    const emailByUserId = {};
-    if (uniqueUserIds.length > 0 && supabase?.auth?.admin?.getUserById) {
-      await Promise.all(
-        uniqueUserIds.map(async (uid) => {
-          try {
-            const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(uid);
-            if (uErr) return;
-            const email = String(uData?.user?.email || "").trim();
-            if (email) emailByUserId[uid] = email;
-          } catch {
-            // ignore
-          }
-        })
-      );
+    // Construire alias RGPD pour les paniers abandonnés
+    const aliasByUserId = {};
+    if (uniqueUserIds.length > 0) {
+      try {
+        const { data: profs } = await supabase
+          .from("profiles")
+          .select("id, username")
+          .in("id", uniqueUserIds);
+        (profs || []).forEach((p) => {
+          const uid = p?.id ? String(p.id) : null;
+          if (!uid) return;
+          const uname = String(p?.username || "").trim();
+          aliasByUserId[uid] = uname || `#${uid.slice(0, 6)}`;
+        });
+      } catch {}
+      uniqueUserIds.forEach((uid) => {
+        if (!aliasByUserId[uid]) aliasByUserId[uid] = `#${uid.slice(0, 6)}`;
+      });
     }
 
     const enriched = safeCarts.map((c) => {
@@ -1394,7 +1403,7 @@ app.get("/api/market/partners/:partnerId/abandoned-carts", async (req, res) => {
       );
       return {
         ...c,
-        customer_email: uid ? emailByUserId[uid] || null : null,
+        customer_alias: uid ? aliasByUserId[uid] || `#${uid.slice(0, 6)}` : null,
         items: its,
         total_minor: totalMinor,
         currency: "EUR",
@@ -2305,13 +2314,20 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const isSeller = sellerId && sellerId === String(guard.userId);
     if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
 
-    let customerEmail = null;
-    if (isSeller && order?.customer_user_id && supabase?.auth?.admin?.getUserById) {
-      try {
-        const { data: uData, error: uErr } = await supabase.auth.admin.getUserById(String(order.customer_user_id));
-        if (!uErr) customerEmail = (uData?.user?.email || "").trim() || null;
-      } catch {}
-    }
+    // Construire un alias RGPD: username du profil, sinon #<6 premiers chars id>
+    let customerAlias = null;
+    try {
+      if (order?.customer_user_id) {
+        const { data: prof } = await supabase
+          .from("profiles")
+          .select("id, username")
+          .eq("id", String(order.customer_user_id))
+          .maybeSingle();
+        const uid = String(order.customer_user_id);
+        const uname = String(prof?.username || "").trim();
+        customerAlias = uname || `#${uid.slice(0, 6)}`;
+      }
+    } catch {}
 
     const { data: items, error: iErr } = await supabase
       .from("partner_order_items")
@@ -2327,13 +2343,28 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
       .maybeSingle();
 
     const ordStatus = String(order?.status || '').toLowerCase();
-    const normalizedFulfillment = (ordStatus === 'cancelled' || ordStatus === 'canceled') ? 'completed' : order?.fulfillment_status || null;
+    const normalizedFulfillment = (ordStatus === 'cancelled' || ordStatus === 'canceled') ? 'completed' : (order?.fulfillment_status || null);
+
+    let orderOut = { ...order, fulfillment_status: normalizedFulfillment, partner_display_name: partner?.display_name || null, customer_alias: customerAlias };
+    if (isSeller && String(normalizedFulfillment || '').toLowerCase() === 'completed') {
+      orderOut = {
+        ...orderOut,
+        customer_first_name: null,
+        customer_last_name: null,
+        customer_phone: null,
+        customer_address_line1: null,
+        customer_address_line2: null,
+        customer_address_postal_code: null,
+        customer_address_city: null,
+        customer_address_country: null,
+      };
+    }
+
     return res.json({
-      order: { ...order, fulfillment_status: normalizedFulfillment, partner_display_name: partner?.display_name || null },
+      order: orderOut,
       items: Array.isArray(items) ? items : [],
       conversationId: conv?.id || null,
       role: isBuyer ? "buyer" : "seller",
-      customer_email: customerEmail,
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -2415,13 +2446,12 @@ app.post("/api/market/orders/:orderId/confirm-received", async (req, res) => {
     const f = String(order.fulfillment_status || "").toLowerCase();
     if (f !== "delivered") return res.status(400).json({ error: "not_delivered" });
 
-    if (!order.buyer_received_at) {
-      const { error: uErr } = await supabase
-        .from("partner_orders")
-        .update({ buyer_received_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq("id", orderId);
-      if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour" });
-    }
+    const now = new Date().toISOString();
+    const { error: uErr } = await supabase
+      .from("partner_orders")
+      .update({ buyer_received_at: order.buyer_received_at || now, fulfillment_status: "completed", fulfillment_updated_at: now, updated_at: now })
+      .eq("id", orderId);
+    if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour" });
 
     let sellerId = null;
     try {
@@ -2461,7 +2491,7 @@ app.get("/api/market/orders/:orderId/messages", async (req, res) => {
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, status")
+      .select("id, partner_id, customer_user_id, status, fulfillment_status")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
@@ -2528,6 +2558,10 @@ app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, 
     const statusNorm = String(order.status || "").toLowerCase();
     if (["pending", "canceled", "cancelled"].includes(statusNorm)) {
       return res.status(400).json({ error: "order_not_paid" });
+    }
+    const fNorm = String(order.fulfillment_status || '').toLowerCase();
+    if (fNorm === 'completed') {
+      return res.status(403).json({ error: "chat_locked" });
     }
 
     const { data: partner, error: pErr } = await supabase
