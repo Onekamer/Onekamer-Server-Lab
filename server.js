@@ -64,6 +64,62 @@ function isDevOrigin(origin) {
   }
 }
 
+let autoCompleteJobRunning = false;
+async function autoCompleteDeliveredOrders() {
+  if (autoCompleteJobRunning) return;
+  autoCompleteJobRunning = true;
+  try {
+    const nowIso = new Date().toISOString();
+    const limit = 50;
+
+    const { data: list1 } = await supabase
+      .from("partner_orders")
+      .select("id")
+      .eq("status", "paid")
+      .eq("fulfillment_status", "delivered")
+      .lte("payout_release_at", nowIso)
+      .order("payout_release_at", { ascending: true })
+      .limit(limit);
+
+    const pastIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: list2 } = await supabase
+      .from("partner_orders")
+      .select("id, payout_release_at")
+      .eq("status", "paid")
+      .eq("fulfillment_status", "delivered")
+      .is("payout_release_at", null)
+      .lte("fulfillment_updated_at", pastIso)
+      .order("fulfillment_updated_at", { ascending: true })
+      .limit(limit);
+
+    const ids = [
+      ...((Array.isArray(list1) ? list1 : []).map((r) => r.id)),
+      ...((Array.isArray(list2) ? list2 : []).map((r) => r.id)),
+    ];
+
+    const uniqueIds = [...new Set(ids.map((x) => String(x)))];
+
+    for (const oid of uniqueIds) {
+      try {
+        const nowU = new Date().toISOString();
+        const { error: uErr } = await supabase
+          .from("partner_orders")
+          .update({ fulfillment_status: "completed", fulfillment_updated_at: nowU, updated_at: nowU })
+          .eq("id", oid)
+          .eq("status", "paid")
+          .eq("fulfillment_status", "delivered");
+        if (!uErr) {
+          try { await releasePartnerOrderPayout(oid, "auto_timeout"); } catch {}
+        }
+      } catch {}
+    }
+  } catch {}
+  autoCompleteJobRunning = false;
+}
+
+setTimeout(() => { try { autoCompleteDeliveredOrders(); } catch {} }, 15000);
+setInterval(() => { try { autoCompleteDeliveredOrders(); } catch {} }, 10 * 60 * 1000);
+
 // ============================================================
 // 🔔 supabase_light — Web Push (LAB)
 // ============================================================
