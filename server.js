@@ -185,17 +185,20 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
         { key: "first_name", label: { type: "custom", custom: "Prénom" }, type: "text", text: { maximum_length: 100 }, optional: false },
         { key: "last_name", label: { type: "custom", custom: "Nom" }, type: "text", text: { maximum_length: 100 }, optional: false },
       ],
-      payment_intent_data: {
-        application_fee_amount: applicationFeeAmount,
-        transfer_data: { destination: destinationAccount },
-      },
       line_items: [
         { price_data: { currency, product_data: { name: "Commande Partenaire — OneKamer" }, unit_amount: unitAmount }, quantity: 1 },
       ],
       mode: "payment",
       success_url: `https://onekamer-front-lab.onrender.com/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `https://onekamer-front-lab.onrender.com/paiement-annule`,
-      metadata: { market_order_id: orderId, partner_id: order.partner_id, customer_user_id: guard.userId },
+      metadata: {
+        market_order_id: orderId,
+        partner_id: order.partner_id,
+        customer_user_id: guard.userId,
+        destination_account: destinationAccount,
+        amount_seller_cents: String(Number(order.partner_amount || 0)),
+        amount_platform_fee_cents: String(Number(order.platform_fee_amount || 0)),
+      },
     });
 
     await supabase.from("partner_order_payments").insert({
@@ -207,7 +210,7 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
     await supabase
       .from("partner_orders")
-      .update({ status: "pending", updated_at: new Date().toISOString() })
+      .update({ status: "pending", checkout_session_id: session.id, destination_account: destinationAccount, updated_at: new Date().toISOString() })
       .eq("id", orderId);
 
     return res.json({ url: session.url });
@@ -398,17 +401,20 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
         { key: "first_name", label: { type: "custom", custom: "Prénom" }, type: "text", text: { maximum_length: 100 }, optional: false },
         { key: "last_name", label: { type: "custom", custom: "Nom" }, type: "text", text: { maximum_length: 100 }, optional: false },
       ],
-      payment_intent_data: {
-        application_fee_amount: applicationFeeAmount,
-        transfer_data: { destination: destinationAccount },
-      },
       line_items: [
         { price_data: { currency, product_data: { name: "Commande Partenaire — OneKamer" }, unit_amount: unitAmount }, quantity: 1 },
       ],
       mode: "payment",
       success_url: `https://onekamer-front-lab.onrender.com/paiement-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `https://onekamer-front-lab.onrender.com/paiement-annule`,
-      metadata: { market_order_id: orderId, partner_id: order.partner_id, customer_user_id: guard.userId },
+      metadata: {
+        market_order_id: orderId,
+        partner_id: order.partner_id,
+        customer_user_id: guard.userId,
+        destination_account: destinationAccount,
+        amount_seller_cents: String(Number(order.partner_amount || 0)),
+        amount_platform_fee_cents: String(Number(order.platform_fee_amount || 0)),
+      },
     });
 
     await supabase.from("partner_order_payments").insert({
@@ -420,7 +426,7 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
     await supabase
       .from("partner_orders")
-      .update({ status: "pending", updated_at: new Date().toISOString() })
+      .update({ status: "pending", checkout_session_id: session.id, destination_account: destinationAccount, updated_at: new Date().toISOString() })
       .eq("id", orderId);
 
     return res.json({ url: session.url });
@@ -613,6 +619,78 @@ const supabase = createClient(
 );
 
 const fxService = createFxService({ supabase, fetchImpl: fetch });
+
+// Libération du payout vendeur (Separate Charges & Transfers)
+async function releasePartnerOrderPayout(orderId, reason = "manual") {
+  const oid = String(orderId);
+  try {
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, status, fulfillment_status, destination_account, partner_amount, charge_currency, transfer_id, transfer_status")
+      .eq("id", oid)
+      .maybeSingle();
+    if (oErr) throw new Error(oErr.message);
+    if (!order) throw new Error("order_not_found");
+
+    if (order.transfer_id) {
+      console.log("release_payout_skip_already_transferred", { order_id: oid, transfer_id: order.transfer_id });
+      return { ok: true, skipped: true, reason: "already_transferred" };
+    }
+
+    const s = String(order.status || "").toLowerCase();
+    const f = String(order.fulfillment_status || "").toLowerCase();
+    if (s !== "paid") throw new Error("order_not_paid");
+    if (f !== "completed") throw new Error("order_not_completed");
+
+    const destination = String(order.destination_account || "").trim();
+    const amountSeller = Number(order.partner_amount || 0);
+    const currency = String(order.charge_currency || "").toLowerCase();
+    if (!destination) throw new Error("destination_missing");
+    if (!Number.isFinite(amountSeller) || amountSeller <= 0) throw new Error("amount_invalid");
+    if (!currency) throw new Error("currency_missing");
+
+    // Mark processing to avoid duplicates in concurrent calls
+    try {
+      await supabase
+        .from("partner_orders")
+        .update({ transfer_status: "processing", updated_at: new Date().toISOString() })
+        .eq("id", oid);
+    } catch {}
+
+    let transfer = null;
+    try {
+      transfer = await stripe.transfers.create(
+        {
+          amount: amountSeller,
+          currency,
+          destination,
+          metadata: { order_id: oid, reason },
+        },
+        { idempotencyKey: `market_order_${oid}` }
+      );
+    } catch (err) {
+      console.error("stripe_transfer_error", { order_id: oid, message: err?.message, code: err?.code });
+      await supabase
+        .from("partner_orders")
+        .update({ transfer_status: "failed", transfer_error: err?.message || String(err), updated_at: new Date().toISOString() })
+        .eq("id", oid);
+      return { ok: false, error: err?.message || String(err) };
+    }
+
+    if (transfer?.id) {
+      await supabase
+        .from("partner_orders")
+        .update({ transfer_id: transfer.id, transfer_status: "paid", transferred_at: new Date().toISOString(), transfer_error: null, updated_at: new Date().toISOString() })
+        .eq("id", oid);
+    }
+
+    console.log("stripe_transfer_success", { order_id: oid, transfer_id: transfer?.id });
+    return { ok: true, transfer_id: transfer?.id || null };
+  } catch (e) {
+    console.error("release_payout_exception", { order_id: String(orderId), message: e?.message || String(e) });
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
 
 // Configuration Stripe (clé publique) pour Elements (LAB)
 app.get("/api/stripe/config", async (req, res) => {
@@ -808,7 +886,6 @@ app.post("/api/invites/track", bodyParser.json(), async (req, res) => {
         meta: meta && typeof meta === "object" ? meta : null,
       });
     if (insErr) return res.status(500).json({ error: insErr.message || "invite_event_insert_failed" });
-
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -2365,9 +2442,14 @@ app.patch("/api/market/orders/:orderId/fulfillment", bodyParser.json(), async (r
     if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
     if (!partner || String(partner.owner_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
 
+    const nowIso = new Date().toISOString();
+    const updatePayload = { fulfillment_status: next, fulfillment_updated_at: nowIso, updated_at: nowIso };
+    if (next === "delivered") {
+      updatePayload.payout_release_at = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    }
     const { data: upd, error: uErr } = await supabase
       .from("partner_orders")
-      .update({ fulfillment_status: next, updated_at: new Date().toISOString() })
+      .update(updatePayload)
       .eq("id", orderId)
       .select("id, fulfillment_status, fulfillment_updated_at")
       .maybeSingle();
@@ -2439,6 +2521,8 @@ app.post("/api/market/orders/:orderId/confirm-received", async (req, res) => {
       } catch {}
     }
 
+    // Déclencher la libération du payout (non bloquant)
+    try { releasePartnerOrderPayout(orderId, "buyer_confirmed"); } catch {}
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
@@ -3258,13 +3342,36 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
       const marketOrderId = session?.metadata?.market_order_id;
       if (marketOrderId) {
         try {
+          const chargeCurrency = typeof session?.currency === "string" ? String(session.currency).toLowerCase() : null;
+          const chargeAmountTotal = typeof session?.amount_total === "number" ? session.amount_total : null;
+          const md = (session && session.metadata) ? session.metadata : {};
+          const dest = md.destination_account || null;
+          const amtSeller = Number(md.amount_seller_cents || 0);
+          const amtPlatform = Number(md.amount_platform_fee_cents || 0);
+
           await supabase
             .from("partner_orders")
             .update({
               status: "paid",
+              checkout_session_id: session.id,
+              payment_intent_id: session.payment_intent || null,
+              destination_account: dest || null,
+              charge_currency: chargeCurrency || null,
+              charge_amount_total: chargeAmountTotal,
+              partner_amount: Number.isFinite(amtSeller) ? amtSeller : null,
+              platform_fee_amount: Number.isFinite(amtPlatform) ? amtPlatform : null,
               updated_at: new Date().toISOString(),
             })
             .eq("id", marketOrderId);
+
+          // Initialiser fulfillment à sent_to_seller si absent
+          try {
+            await supabase
+              .from("partner_orders")
+              .update({ fulfillment_status: "sent_to_seller", fulfillment_updated_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+              .eq("id", marketOrderId)
+              .is("fulfillment_status", null);
+          } catch {}
 
           await supabase
             .from("partner_order_payments")
