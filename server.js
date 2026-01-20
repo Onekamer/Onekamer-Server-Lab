@@ -4839,6 +4839,197 @@ app.get("/api/admin/market/partners/performance", async (req, res) => {
   }
 });
 
+// ============================================================
+// 🛡️ Admin - Commandes Marketplace
+//   - Liste/recherche par order_number, partner, statut
+//   - Détail commande (avec lignes)
+//   - Changer statut (refunded, disputed, failed)
+// ============================================================
+
+app.get("/api/admin/market/orders", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const partnerId = req.query.partnerId ? String(req.query.partnerId).trim() : "";
+    const statusFilter = req.query.status ? String(req.query.status).trim().toLowerCase() : "";
+    const fulfillment = req.query.fulfillment ? String(req.query.fulfillment).trim().toLowerCase() : "";
+    const orderNumberRaw = req.query.orderNumber ? String(req.query.orderNumber).trim() : "";
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    let q = supabase
+      .from("partner_orders")
+      .select(
+        "id, partner_id, customer_user_id, order_number, status, fulfillment_status, payout_release_at, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at",
+        { count: "exact" }
+      )
+      .order("created_at", { ascending: false });
+
+    if (partnerId) q = q.eq("partner_id", partnerId);
+
+    if (statusFilter && statusFilter !== "all") {
+      const allowed = ["pending", "paid", "refunded", "disputed", "failed", "canceled", "cancelled"];
+      if (!allowed.includes(statusFilter)) return res.status(400).json({ error: "invalid_status" });
+      q = q.eq("status", statusFilter);
+    }
+
+    if (fulfillment) {
+      const allowedF = ["sent_to_seller", "preparing", "shipping", "delivered", "completed"];
+      if (!allowedF.includes(fulfillment)) return res.status(400).json({ error: "invalid_fulfillment" });
+      q = q.eq("fulfillment_status", fulfillment);
+    }
+
+    let orderNumber = null;
+    if (orderNumberRaw && /^\d+$/.test(orderNumberRaw)) orderNumber = parseInt(orderNumberRaw, 10);
+    if (!orderNumber && search && /^\d+$/.test(search)) orderNumber = parseInt(search, 10);
+    if (Number.isInteger(orderNumber)) q = q.eq("order_number", orderNumber);
+
+    const { data: rows, error, count } = await q.range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture commandes" });
+
+    const partnerIds = Array.isArray(rows) ? Array.from(new Set(rows.map((r) => r?.partner_id).filter(Boolean))) : [];
+    const partnerById = new Map();
+    if (partnerIds.length > 0) {
+      const { data: partners } = await supabase.from("partners_market").select("id, display_name").in("id", partnerIds);
+      (partners || []).forEach((p) => partnerById.set(String(p.id), p));
+    }
+
+    const orders = (rows || []).map((o) => ({
+      ...o,
+      partner_display_name: partnerById.get(String(o.partner_id))?.display_name || null,
+    }));
+
+    return res.json({ orders, count: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/admin/market/orders/:orderId", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select(
+        "id, partner_id, customer_user_id, order_number, status, fulfillment_status, payout_release_at, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, destination_account, checkout_session_id, payment_intent_id, transfer_id, transfer_status, transferred_at, transfer_error, created_at, updated_at"
+      )
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const { data: items, error: iErr } = await supabase
+      .from("partner_order_items")
+      .select("id, item_id, title_snapshot, unit_base_price_amount, quantity, total_base_amount")
+      .eq("order_id", orderId)
+      .order("created_at", { ascending: true });
+    if (iErr) return res.status(500).json({ error: iErr.message || "Erreur lecture lignes commande" });
+
+    const { data: partner } = await supabase
+      .from("partners_market")
+      .select("id, display_name, owner_user_id")
+      .eq("id", order.partner_id)
+      .maybeSingle();
+
+    return res.json({ order, items: items || [], partner });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    const { status, reason, note } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const st = String(status || "").toLowerCase();
+    const allowed = ["refunded", "disputed", "failed"];
+    if (!allowed.includes(st)) return res.status(400).json({ error: "invalid_status" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    if (String(order.status || "").toLowerCase() === st) {
+      return res.json({ ok: true, orderId, status: st });
+    }
+
+    const { error: uErr } = await supabase
+      .from("partner_orders")
+      .update({ status: st, updated_at: new Date().toISOString() })
+      .eq("id", orderId);
+    if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour statut" });
+
+    let sellerId = null;
+    try {
+      const { data: partner } = await supabase.from("partners_market").select("id, owner_user_id").eq("id", order.partner_id).maybeSingle();
+      sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    } catch {}
+
+    const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
+    const titleMap = { refunded: "Commande remboursée", disputed: "Litige commande", failed: "Paiement échoué" };
+    const msg = reason ? `${st} - ${reason}` : `Statut: ${st}`;
+
+    try {
+      if (buyerId) {
+        await sendSupabaseLightPush({
+          title: titleMap[st] || "Mise à jour commande",
+          message: msg,
+          targetUserIds: [buyerId],
+          data: { type: "market_order_admin_status", orderId, status: st },
+          url: `/market/orders/${orderId}`,
+        });
+      }
+    } catch {}
+
+    try {
+      if (sellerId) {
+        await sendSupabaseLightPush({
+          title: titleMap[st] || "Mise à jour commande",
+          message: msg,
+          targetUserIds: [sellerId],
+          data: { type: "market_order_admin_status", orderId, status: st },
+          url: `/market/orders/${orderId}`,
+        });
+      }
+    } catch {}
+
+    try {
+      await logEvent({
+        category: "marketplace",
+        action: "admin.order.status",
+        status: "success",
+        userId: guard.userId,
+        context: { orderId, status: st, reason: reason || null, note: note || null },
+      });
+    } catch {}
+
+    return res.json({ ok: true, orderId, status: st });
+  } catch (e) {
+    try {
+      await logEvent({ category: "marketplace", action: "admin.order.status", status: "error", context: { error: e?.message || String(e) } });
+    } catch {}
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/admin/moderation/warn", async (req, res) => {
   let actionId = null;
   try {
