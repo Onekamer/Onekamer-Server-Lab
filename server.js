@@ -2194,8 +2194,11 @@ app.get("/api/market/orders", async (req, res) => {
 
     const enriched = safeOrders.map((o) => {
       const oid = o?.id ? String(o.id) : null;
+      const s = String(o?.status || '').toLowerCase();
+      const normalizedFulfillment = (s === 'cancelled' || s === 'canceled') ? 'completed' : o?.fulfillment_status || null;
       return {
         ...o,
+        fulfillment_status: normalizedFulfillment,
         items: oid ? itemsByOrderId[oid] || [] : [],
         partner_display_name: o?.partner_id ? (partnerNameById[String(o.partner_id)] || null) : null,
       };
@@ -2258,8 +2261,10 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
       .eq("order_id", orderId)
       .maybeSingle();
 
+    const ordStatus = String(order?.status || '').toLowerCase();
+    const normalizedFulfillment = (ordStatus === 'cancelled' || ordStatus === 'canceled') ? 'completed' : order?.fulfillment_status || null;
     return res.json({
-      order: { ...order, partner_display_name: partner?.display_name || null },
+      order: { ...order, fulfillment_status: normalizedFulfillment, partner_display_name: partner?.display_name || null },
       items: Array.isArray(items) ? items : [],
       conversationId: conv?.id || null,
       role: isBuyer ? "buyer" : "seller",
