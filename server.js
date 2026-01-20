@@ -5030,6 +5030,131 @@ app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (
   }
 });
 
+app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const amountRaw = req.body?.amount_minor;
+    const reasonRaw = req.body?.reason;
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, payment_intent_id, charge_amount_total, charge_currency, transfer_id, transfer_status, status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const total = Math.max(0, parseInt(order.charge_amount_total || 0, 10));
+    if (!order.payment_intent_id || total <= 0) return res.status(400).json({ error: "order_not_refundable" });
+
+    let amount = null;
+    if (amountRaw != null) {
+      const a = parseInt(amountRaw, 10);
+      if (!Number.isInteger(a) || a <= 0 || a > total) return res.status(400).json({ error: "invalid_amount" });
+      amount = a;
+    } else {
+      amount = total;
+    }
+
+    const reasonAllow = new Set(["duplicate", "fraudulent", "requested_by_customer"]);
+    const reason = reasonAllow.has(String(reasonRaw || "").toLowerCase()) ? String(reasonRaw).toLowerCase() : "requested_by_customer";
+
+    // Si le transfert a déjà été payé au vendeur, on le reverse d'abord
+    if (order.transfer_id && String(order.transfer_status || "").toLowerCase() === "paid") {
+      try {
+        await stripe.transfers.createReversal(
+          order.transfer_id,
+          { amount },
+          { idempotencyKey: `order_transfer_reverse_${orderId}_${amount}` }
+        );
+        await supabase
+          .from("partner_orders")
+          .update({ transfer_status: "reversed", updated_at: new Date().toISOString() })
+          .eq("id", orderId);
+      } catch (e) {
+        return res.status(409).json({ error: "transfer_reversal_failed", detail: e?.message || String(e) });
+      }
+    }
+
+    let refund = null;
+    try {
+      refund = await stripe.refunds.create(
+        { payment_intent: order.payment_intent_id, amount, reason },
+        { idempotencyKey: `order_refund_${orderId}_${amount}` }
+      );
+    } catch (e) {
+      return res.status(502).json({ error: "refund_failed", detail: e?.message || String(e) });
+    }
+
+    await supabase
+      .from("partner_orders")
+      .update({ status: "refunded", updated_at: new Date().toISOString() })
+      .eq("id", orderId);
+
+    const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
+    let sellerId = null;
+    try {
+      const { data: partner } = await supabase
+        .from("partners_market")
+        .select("id, owner_user_id")
+        .eq("id", order.partner_id)
+        .maybeSingle();
+      sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    } catch {}
+
+    const cur = String(order.charge_currency || "").toUpperCase();
+    const amtStr = `${(amount / 100).toFixed(2)} ${cur || ""}`.trim();
+    const title = "Remboursement confirmé";
+    const message = `Montant remboursé: ${amtStr}`;
+
+    try {
+      if (buyerId) {
+        await sendSupabaseLightPush({
+          title,
+          message,
+          targetUserIds: [buyerId],
+          url: `/market/orders/${orderId}`,
+          data: { type: "market_order_refund", orderId, amount },
+        });
+      }
+    } catch {}
+
+    try {
+      if (sellerId) {
+        await sendSupabaseLightPush({
+          title,
+          message,
+          targetUserIds: [sellerId],
+          url: `/market/orders/${orderId}`,
+          data: { type: "market_order_refund", orderId, amount },
+        });
+      }
+    } catch {}
+
+    try {
+      await logEvent({
+        category: "marketplace",
+        action: "admin.order.refund",
+        status: "success",
+        userId: guard.userId,
+        context: { orderId, amount, reason, refund_id: refund?.id || null },
+      });
+    } catch {}
+
+    return res.json({ ok: true, orderId, amount, currency: cur, refund_id: refund?.id || null });
+  } catch (e) {
+    try {
+      await logEvent({ category: "marketplace", action: "admin.order.refund", status: "error", context: { error: e?.message || String(e) } });
+    } catch {}
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/admin/moderation/warn", async (req, res) => {
   let actionId = null;
   try {
