@@ -2366,7 +2366,7 @@ app.get("/api/market/orders/:orderId", async (req, res) => {
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at, order_number, customer_first_name, customer_last_name, customer_phone, customer_address_line1, customer_address_line2, customer_address_postal_code, customer_address_city, customer_address_country, customer_country_code"
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, fulfillment_status, fulfillment_updated_at, buyer_received_at, payout_release_at, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at, order_number, customer_first_name, customer_last_name, customer_phone, customer_address_line1, customer_address_line2, customer_address_postal_code, customer_address_city, customer_address_country, customer_country_code"
       )
       .eq("id", orderId)
       .maybeSingle();
