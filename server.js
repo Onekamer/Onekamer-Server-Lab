@@ -1082,14 +1082,8 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
 
     const paidStates = ["paid", "refunded", "disputed"];
     query = query.in("status", paidStates);
-    if (fulfillmentFilter && fulfillmentFilter !== "all") {
-      const list = fulfillmentFilter.split(",").map((s) => s.trim()).filter(Boolean);
-      if (list.length === 1) {
-        query = query.eq("fulfillment_status", list[0]);
-      } else if (list.length > 1) {
-        query = query.in("fulfillment_status", list);
-      }
-    } else if (statusFilter && statusFilter !== "all") {
+    if (!fulfillmentFilter || fulfillmentFilter === "all") {
+      // Compat: ancien filtre par status si aucun filtre fulfillment fourni
       if (statusFilter === "pending") {
         query = query.eq("status", "pending");
       } else if (statusFilter === "paid") {
@@ -1104,7 +1098,23 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     const { data: orders, error: oErr } = await query;
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commandes" });
 
-    const safeOrders = Array.isArray(orders) ? orders : [];
+    let safeOrders = Array.isArray(orders) ? orders : [];
+    // Appliquer le filtre fulfillment côté JS en normalisant le statut
+    const normFulfillment = (o) => {
+      const s = String(o?.status || '').toLowerCase();
+      if (s === 'canceled' || s === 'cancelled') return 'completed';
+      if (paidStates.includes(s)) {
+        const f = String(o?.fulfillment_status || '').toLowerCase();
+        return f || 'sent_to_seller';
+      }
+      return o?.fulfillment_status || null;
+    };
+
+    if (fulfillmentFilter && fulfillmentFilter !== "all") {
+      const list = fulfillmentFilter.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+      safeOrders = safeOrders.filter((o) => list.includes(normFulfillment(o)));
+    }
+
     const orderIds = safeOrders.map((o) => o.id).filter(Boolean);
     const partnerIds = [...new Set(safeOrders.map((o) => (o?.partner_id ? String(o.partner_id) : null)).filter(Boolean))];
 
@@ -1164,8 +1174,11 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     const enriched = safeOrders.map((o) => {
       const oid = o?.id ? String(o.id) : null;
       const uid = o?.customer_user_id ? String(o.customer_user_id) : null;
+      const s = String(o?.status || '').toLowerCase();
+      const f = normFulfillment(o);
       return {
         ...o,
+        fulfillment_status: f,
         customer_email: uid ? emailByUserId[uid] || null : null,
         items: oid ? itemsByOrderId[oid] || [] : [],
       };
