@@ -219,6 +219,27 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
   }
 });
 
+app.post("/api/partner/connect/login-link", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.body || {};
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const accountId = auth.partner?.stripe_connect_account_id ? String(auth.partner.stripe_connect_account_id) : null;
+    if (!accountId) return res.status(400).json({ error: "stripe_connect_account_id manquant" });
+
+    const frontendBase = String(process.env.FRONTEND_URL || "https://onekamer-front-lab.onrender.com").replace(/\/$/, "");
+    const redirectUrl = `${frontendBase}/compte`;
+
+    const link = await stripe.accounts.createLoginLink(accountId, { redirect_url: redirectUrl });
+    return res.json({ url: link?.url || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 // Annuler une commande (par acheteur) si non payée
 app.post("/api/market/orders/:orderId/cancel", async (req, res) => {
   try {
