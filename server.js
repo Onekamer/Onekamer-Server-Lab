@@ -452,7 +452,7 @@ app.post("/api/market/orders/:orderId/cancel", async (req, res) => {
 
     const { error } = await supabase
       .from("partner_orders")
-      .update({ status: "cancelled", updated_at: new Date().toISOString() })
+      .update({ status: "cancelled", fulfillment_status: "completed", fulfillment_updated_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", orderId);
     if (error) return res.status(500).json({ error: error.message || "Erreur annulation" });
 
@@ -1067,19 +1067,29 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
     const statusFilter = String(req.query.status || "all").trim().toLowerCase();
+    const fulfillmentFilter = String(req.query.fulfillment || "all").trim().toLowerCase();
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
     let query = supabase
       .from("partner_orders")
       .select(
-        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, customer_country_code, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, created_at, updated_at, order_number"
+        "id, partner_id, customer_user_id, status, delivery_mode, customer_note, customer_country_code, base_currency, base_amount_total, charge_currency, charge_amount_total, platform_fee_amount, partner_amount, fulfillment_status, fulfillment_updated_at, created_at, updated_at, order_number"
       )
       .eq("partner_id", partnerId)
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
-    if (statusFilter && statusFilter !== "all") {
+    const paidStates = ["paid", "refunded", "disputed"];
+    query = query.in("status", paidStates);
+    if (fulfillmentFilter && fulfillmentFilter !== "all") {
+      const list = fulfillmentFilter.split(",").map((s) => s.trim()).filter(Boolean);
+      if (list.length === 1) {
+        query = query.eq("fulfillment_status", list[0]);
+      } else if (list.length > 1) {
+        query = query.in("fulfillment_status", list);
+      }
+    } else if (statusFilter && statusFilter !== "all") {
       if (statusFilter === "pending") {
         query = query.eq("status", "pending");
       } else if (statusFilter === "paid") {
@@ -1162,6 +1172,45 @@ app.get("/api/market/partners/:partnerId/orders", async (req, res) => {
     });
 
     return res.json({ orders: enriched, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/market/partners/:partnerId/orders/:orderId/mark-received", async (req, res) => {
+  try {
+    const { partnerId, orderId } = req.params;
+    if (!partnerId || !orderId) return res.status(400).json({ error: "partnerId et orderId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, status, fulfillment_status")
+      .eq("id", orderId)
+      .eq("partner_id", partnerId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    const s = String(order.status || "").toLowerCase();
+    const f = String(order.fulfillment_status || "").toLowerCase();
+    if (!["paid", "refunded", "disputed"].includes(s)) return res.status(400).json({ error: "order_payment_invalid" });
+    if (f !== "sent_to_seller") return res.status(400).json({ error: "fulfillment_transition_invalid" });
+
+    const { error: upErr } = await supabase
+      .from("partner_orders")
+      .update({
+        fulfillment_status: "preparing",
+        fulfillment_updated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", orderId)
+      .eq("partner_id", partnerId);
+    if (upErr) return res.status(500).json({ error: upErr.message || "update_failed" });
+
+    return res.json({ success: true, fulfillment_status: "preparing" });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
@@ -2052,6 +2101,8 @@ app.post("/api/market/orders/sync-payment", bodyParser.json(), async (req, res) 
       .from("partner_orders")
       .update({
         status: "paid",
+        fulfillment_status: "sent_to_seller",
+        fulfillment_updated_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("id", orderId);
