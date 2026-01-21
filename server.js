@@ -361,8 +361,8 @@ app.put("/api/market/partners/:partnerId/shipping-options", bodyParser.json(), a
         shop_id: partnerId,
         shipping_type: n.shipping_type,
         label: n.label || (n.shipping_type === "pickup" ? "Retrait sur place" : n.shipping_type === "standard" ? "Livraison standard" : n.shipping_type === "express" ? "Livraison express" : "Livraison internationale"),
-        price_cents: n.shipping_type === "pickup" ? 0 : n.price_cents,
-        is_active: n.shipping_type === "pickup" ? true : n.is_active === true,
+        price_cents: n.price_cents,
+        is_active: n.is_active === true,
         updated_at: new Date().toISOString(),
       };
       if (id) {
@@ -2123,17 +2123,22 @@ app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
   const normalizedMode = allowedModes.has(rawMode) ? rawMode : "pickup";
 
   let shippingBaseFee = 0;
-  if (normalizedMode !== "pickup") {
-    const { data: opt, error: oErr2 } = await supabase
-      .from("shipping_options")
-      .select("shipping_type, price_cents, is_active")
-      .eq("shop_id", partnerId)
-      .eq("shipping_type", normalizedMode)
-      .maybeSingle();
-    if (oErr2) return res.status(500).json({ error: oErr2.message || "Erreur options livraison" });
-    if (!opt || opt.is_active !== true) return res.status(400).json({ error: "shipping_option_unavailable" });
-    const price = Math.max(parseInt(opt.price_cents, 10) || 0, 0);
-    shippingBaseFee = price;
+  const { data: opt, error: oErr2 } = await supabase
+    .from("shipping_options")
+    .select("shipping_type, price_cents, is_active")
+    .eq("shop_id", partnerId)
+    .eq("shipping_type", normalizedMode)
+    .maybeSingle();
+  if (oErr2) return res.status(500).json({ error: oErr2.message || "Erreur options livraison" });
+  if (opt) {
+    if (opt.is_active !== true) return res.status(400).json({ error: "shipping_option_unavailable" });
+    shippingBaseFee = Math.max(parseInt(opt.price_cents, 10) || 0, 0);
+  } else {
+    if (normalizedMode === "pickup") {
+      shippingBaseFee = 0;
+    } else {
+      return res.status(400).json({ error: "shipping_option_unavailable" });
+    }
   }
 
   const baseTotalWithShipping = Math.max(baseTotal + shippingBaseFee, 0);
