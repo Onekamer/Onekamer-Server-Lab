@@ -6580,6 +6580,39 @@ app.get("/influenceur/mes-stats", cors(), async (req, res) => {
   }
 });
 
+app.get("/__version", (req, res) => {
+  res.json({
+    git: {
+      commit: process.env.RENDER_GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || process.env.COMMIT_REF || null,
+      branch: process.env.RENDER_GIT_BRANCH || process.env.VERCEL_GIT_COMMIT_REF || process.env.BRANCH || null,
+    },
+    pid: process.pid,
+  });
+});
+
+app.get("/__routes", (req, res) => {
+  try {
+    const routes = [];
+    const stack = app?._router?.stack || [];
+    stack.forEach((layer) => {
+      if (layer?.route?.path) {
+        const methods = Object.keys(layer.route.methods || {});
+        routes.push({ path: layer.route.path, methods });
+      } else if (layer?.name === "router" && layer?.handle?.stack) {
+        layer.handle.stack.forEach((sub) => {
+          if (sub?.route?.path) {
+            const methods = Object.keys(sub.route.methods || {});
+            routes.push({ path: sub.route.path, methods });
+          }
+        });
+      }
+    });
+    res.json({ routes });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || "routes_dump_failed" });
+  }
+});
+
 app.get("/", (req, res) => {
   res.send("✅ OneKamer backend est opérationnel !");
 });
