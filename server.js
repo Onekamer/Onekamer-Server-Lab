@@ -289,7 +289,6 @@ app.get("/api/market/partners/:partnerId/shipping-options", async (req, res) => 
       .eq("id", partnerId)
       .maybeSingle();
     if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
-    if (!shop) return res.status(404).json({ error: "partner_not_found" });
 
     const { data: rows, error } = await supabase
       .from("shipping_options")
