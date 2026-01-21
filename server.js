@@ -4552,7 +4552,8 @@ app.get("/api/admin/market/partners", async (req, res) => {
     const search = req.query.search ? String(req.query.search).trim() : "";
     const limitRaw = req.query.limit;
     const offsetRaw = req.query.offset;
-    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
+    // Limite par défaut plus basse pour éviter une charge mémoire côté admin
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 5, 1), 50);
     const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
 
     let q = supabase
@@ -4961,7 +4962,7 @@ app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (
     if (!orderId) return res.status(400).json({ error: "orderId requis" });
 
     const st = String(status || "").toLowerCase();
-    const allowed = ["refunded", "disputed", "failed"];
+    const allowed = ["refunded", "disputed"];
     if (!allowed.includes(st)) return res.status(400).json({ error: "invalid_status" });
 
     const { data: order, error: oErr } = await supabase
@@ -4989,7 +4990,7 @@ app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (
     } catch {}
 
     const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
-    const titleMap = { refunded: "Commande remboursée", disputed: "Litige commande", failed: "Paiement échoué" };
+    const titleMap = { refunded: "Commande remboursée", disputed: "Litige commande" };
     const msg = reason ? `${st} - ${reason}` : `Statut: ${st}`;
 
     try {
@@ -5035,6 +5036,91 @@ app.patch("/api/admin/market/orders/:orderId/status", bodyParser.json(), async (
   }
 });
 
+// Marquer la commande comme terminée (admin) — ne déclenche PAS la libération du payout
+app.patch("/api/admin/market/orders/:orderId/fulfillment", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    const { fulfillment_status, reason } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const fs = String(fulfillment_status || "").toLowerCase();
+    if (fs !== "completed") return res.status(400).json({ error: "invalid_fulfillment" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, fulfillment_status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    if (String(order.fulfillment_status || "").toLowerCase() === "completed") {
+      return res.json({ ok: true, orderId, fulfillment_status: "completed", dedup: true });
+    }
+
+    const nowIso = new Date().toISOString();
+    const { error: uErr } = await supabase
+      .from("partner_orders")
+      .update({ fulfillment_status: "completed", fulfillment_updated_at: nowIso, updated_at: nowIso })
+      .eq("id", orderId);
+    if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour commande" });
+
+    // Notifications buyer/seller
+    let sellerId = null;
+    try {
+      const { data: partner } = await supabase.from("partners_market").select("id, owner_user_id").eq("id", order.partner_id).maybeSingle();
+      sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    } catch {}
+    const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
+
+    const title = "Commande terminée (admin)";
+    const message = reason ? `Terminé par l'admin - ${reason}` : "Terminé par l'admin";
+    try {
+      if (buyerId) {
+        await sendSupabaseLightPush({
+          title,
+          message,
+          targetUserIds: [buyerId],
+          url: `/market/orders/${orderId}`,
+          data: { type: "market_order_admin_fulfillment", orderId, fulfillment_status: "completed" },
+        });
+      }
+    } catch {}
+
+    try {
+      if (sellerId) {
+        await sendSupabaseLightPush({
+          title,
+          message,
+          targetUserIds: [sellerId],
+          url: `/market/orders/${orderId}`,
+          data: { type: "market_order_admin_fulfillment", orderId, fulfillment_status: "completed" },
+        });
+      }
+    } catch {}
+
+    try {
+      await logEvent({
+        category: "marketplace",
+        action: "admin.order.fulfillment",
+        status: "success",
+        userId: guard.userId,
+        context: { orderId, fulfillment_status: "completed", reason: reason || null },
+      });
+    } catch {}
+
+    return res.json({ ok: true, orderId, fulfillment_status: "completed" });
+  } catch (e) {
+    try {
+      await logEvent({ category: "marketplace", action: "admin.order.fulfillment", status: "error", context: { error: e?.message || String(e) } });
+    } catch {}
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (req, res) => {
   try {
     const guard = await requireAdminIsAdmin(req);
@@ -5044,62 +5130,23 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
     if (!orderId) return res.status(400).json({ error: "orderId requis" });
 
     const amountRaw = req.body?.amount_minor;
-    const reasonRaw = req.body?.reason;
+    const reason = req.body?.reason ? String(req.body.reason) : null;
 
     const { data: order, error: oErr } = await supabase
       .from("partner_orders")
-      .select("id, partner_id, customer_user_id, payment_intent_id, charge_amount_total, charge_currency, transfer_id, transfer_status, status")
+      .select("id, partner_id, customer_user_id, charge_amount_total, charge_currency, status")
       .eq("id", orderId)
       .maybeSingle();
     if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
     if (!order) return res.status(404).json({ error: "order_not_found" });
 
-    const total = Math.max(0, parseInt(order.charge_amount_total || 0, 10));
-    if (!order.payment_intent_id || total <= 0) return res.status(400).json({ error: "order_not_refundable" });
-
-    let amount = null;
-    if (amountRaw != null) {
-      const a = parseInt(amountRaw, 10);
-      if (!Number.isInteger(a) || a <= 0 || a > total) return res.status(400).json({ error: "invalid_amount" });
-      amount = a;
-    } else {
-      amount = total;
-    }
-
-    const reasonAllow = new Set(["duplicate", "fraudulent", "requested_by_customer"]);
-    const reason = reasonAllow.has(String(reasonRaw || "").toLowerCase()) ? String(reasonRaw).toLowerCase() : "requested_by_customer";
-
-    // Si le transfert a déjà été payé au vendeur, on le reverse d'abord
-    if (order.transfer_id && String(order.transfer_status || "").toLowerCase() === "paid") {
-      try {
-        await stripe.transfers.createReversal(
-          order.transfer_id,
-          { amount },
-          { idempotencyKey: `order_transfer_reverse_${orderId}_${amount}` }
-        );
-        await supabase
-          .from("partner_orders")
-          .update({ transfer_status: "reversed", updated_at: new Date().toISOString() })
-          .eq("id", orderId);
-      } catch (e) {
-        return res.status(409).json({ error: "transfer_reversal_failed", detail: e?.message || String(e) });
-      }
-    }
-
-    let refund = null;
-    try {
-      refund = await stripe.refunds.create(
-        { payment_intent: order.payment_intent_id, amount, reason },
-        { idempotencyKey: `order_refund_${orderId}_${amount}` }
-      );
-    } catch (e) {
-      return res.status(502).json({ error: "refund_failed", detail: e?.message || String(e) });
-    }
-
-    await supabase
+    // Mise à jour simple sans interaction Stripe (manuel côté Stripe)
+    const nowIso = new Date().toISOString();
+    const { error: uErr } = await supabase
       .from("partner_orders")
-      .update({ status: "refunded", updated_at: new Date().toISOString() })
+      .update({ status: "refunded", updated_at: nowIso })
       .eq("id", orderId);
+    if (uErr) return res.status(500).json({ error: uErr.message || "Erreur mise à jour statut" });
 
     const buyerId = order?.customer_user_id ? String(order.customer_user_id) : null;
     let sellerId = null;
@@ -5112,10 +5159,11 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
       sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
     } catch {}
 
+    const amountMinor = Number.isFinite(parseInt(amountRaw, 10)) ? parseInt(amountRaw, 10) : null;
     const cur = String(order.charge_currency || "").toUpperCase();
-    const amtStr = `${(amount / 100).toFixed(2)} ${cur || ""}`.trim();
+    const amtStr = amountMinor != null ? `${(amountMinor / 100).toFixed(2)} ${cur || ""}`.trim() : null;
     const title = "Remboursement confirmé";
-    const message = `Montant remboursé: ${amtStr}`;
+    const message = amtStr ? `Montant remboursé: ${amtStr}` : "Commande marquée remboursée";
 
     try {
       if (buyerId) {
@@ -5124,7 +5172,7 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
           message,
           targetUserIds: [buyerId],
           url: `/market/orders/${orderId}`,
-          data: { type: "market_order_refund", orderId, amount },
+          data: { type: "market_order_refund", orderId, amount_minor: amountMinor },
         });
       }
     } catch {}
@@ -5136,7 +5184,7 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
           message,
           targetUserIds: [sellerId],
           url: `/market/orders/${orderId}`,
-          data: { type: "market_order_refund", orderId, amount },
+          data: { type: "market_order_refund", orderId, amount_minor: amountMinor },
         });
       }
     } catch {}
@@ -5147,11 +5195,11 @@ app.post("/api/admin/market/orders/:orderId/refund", bodyParser.json(), async (r
         action: "admin.order.refund",
         status: "success",
         userId: guard.userId,
-        context: { orderId, amount, reason, refund_id: refund?.id || null },
+        context: { orderId, amount_minor: amountMinor, reason: reason || null },
       });
     } catch {}
 
-    return res.json({ ok: true, orderId, amount, currency: cur, refund_id: refund?.id || null });
+    return res.json({ ok: true, orderId, amount_minor: amountMinor, currency: cur });
   } catch (e) {
     try {
       await logEvent({ category: "marketplace", action: "admin.order.refund", status: "error", context: { error: e?.message || String(e) } });
