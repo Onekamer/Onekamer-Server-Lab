@@ -37,14 +37,17 @@ const fetch = globalThis.fetch;
 // =======================================================
 const app = express();
 const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "supabase_light";
-// 🔹 Récupération et gestion de plusieurs origines depuis l'environnement
-const allowedOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(",").map(origin => origin.trim())
-  : [
-      "https://onekamer.co",                        // Horizon (production)
-      "https://onekamer-front-render.onrender.com", // Render (ancien test/labo)
-      "https://onekamer-front-lab.onrender.com",    // Render (front lab actuel)
-    ];
+// 🔹 Récupération et gestion de plusieurs origines depuis l'environnement (fusion défaut + ENV)
+const defaultOrigins = [
+  "https://onekamer.co",                        // Horizon (production)
+  "https://www.onekamer.co",                    // Horizon (www)
+  "https://onekamer-front-render.onrender.com", // Render (ancien test/labo)
+  "https://onekamer-front-lab.onrender.com",    // Render (front lab actuel)
+];
+const envOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",").map((origin) => origin.trim()).filter(Boolean)
+  : [];
+const allowedOrigins = Array.from(new Set([...defaultOrigins, ...envOrigins]));
 
 // 🔧 Autorisations locales pour le développement/tests (sans ouvrir la prod)
 function isDevOrigin(origin) {
@@ -652,30 +655,32 @@ async function handleAtTousIfAllowed({
   }
 }
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Autorise les appels sans origin (ex: Postman, tests internes)
-      if (!origin) return callback(null, true);
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Autorise les appels sans origin (ex: Postman, tests internes)
+    if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin) || isDevOrigin(origin)) {
-        callback(null, true);
-      } else {
-        console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
-        callback(new Error("Non autorisé par CORS"));
-      }
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "x-admin-token",
-    ],
-    credentials: true,
-  })
-);
+    if (allowedOrigins.includes(origin) || isDevOrigin(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
+      callback(new Error("Non autorisé par CORS"));
+    }
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "x-admin-token",
+  ],
+  credentials: true,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
 
