@@ -784,6 +784,242 @@ app.post("/api/market/orders/:orderId/cancel", async (req, res) => {
   }
 });
 
+// Shipping options (top-level registration)
+app.get("/api/market/partners/:partnerId/shipping-options", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const { data: shop, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, base_currency")
+      .eq("id", partnerId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+
+    const { data: rows, error } = await supabase
+      .from("shipping_options")
+      .select("id, shop_id, shipping_type, label, price_cents, is_active, created_at, updated_at")
+      .eq("shop_id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture options livraison" });
+
+    const allowed = ["pickup", "standard", "express", "international"];
+    const defaults = {
+      pickup: { shipping_type: "pickup", label: "Retrait sur place", price_cents: 0, is_active: true },
+      standard: { shipping_type: "standard", label: "Livraison standard", price_cents: 0, is_active: false },
+      express: { shipping_type: "express", label: "Livraison express", price_cents: 0, is_active: false },
+      international: { shipping_type: "international", label: "Livraison internationale", price_cents: 0, is_active: false },
+    };
+
+    const byType = new Map();
+    (Array.isArray(rows) ? rows : []).forEach((r) => {
+      const t = String(r?.shipping_type || "").toLowerCase();
+      if (allowed.includes(t)) byType.set(t, r);
+    });
+
+    const options = allowed.map((t) => {
+      const r = byType.get(t);
+      if (r) return r;
+      const d = defaults[t];
+      return { id: null, shop_id: partnerId, ...d };
+    });
+
+    return res.json({ options, base_currency: shop?.base_currency || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.put("/api/market/partners/:partnerId/shipping-options", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const allowed = new Set(["pickup", "standard", "express", "international"]);
+    const payload = Array.isArray(req.body) ? req.body : Array.isArray(req.body?.options) ? req.body.options : [];
+    if (!Array.isArray(payload)) return res.status(400).json({ error: "payload_invalid" });
+
+    const normalized = payload
+      .map((x) => ({
+        shipping_type: String(x?.shipping_type || "").toLowerCase().trim(),
+        label: typeof x?.label === "string" ? x.label.trim().slice(0, 120) : null,
+        price_cents: Math.max(parseInt(x?.price_cents, 10) || 0, 0),
+        is_active: x?.is_active === true,
+      }))
+      .filter((x) => allowed.has(x.shipping_type));
+
+    const { data: existing, error: exErr } = await supabase
+      .from("shipping_options")
+      .select("id, shipping_type")
+      .eq("shop_id", partnerId);
+    if (exErr) return res.status(500).json({ error: exErr.message || "Erreur lecture options" });
+    const idByType = new Map((existing || []).map((r) => [String(r.shipping_type).toLowerCase(), r.id]));
+
+    const toInsert = [];
+    const toUpdate = [];
+    normalized.forEach((n) => {
+      const id = idByType.get(n.shipping_type) || null;
+      const row = {
+        shop_id: partnerId,
+        shipping_type: n.shipping_type,
+        label: n.label || (n.shipping_type === "pickup" ? "Retrait sur place" : n.shipping_type === "standard" ? "Livraison standard" : n.shipping_type === "express" ? "Livraison express" : "Livraison internationale"),
+        price_cents: n.price_cents,
+        is_active: n.is_active === true,
+        updated_at: new Date().toISOString(),
+      };
+      if (id) {
+        toUpdate.push({ id, ...row });
+      } else {
+        toInsert.push({ ...row, created_at: new Date().toISOString() });
+      }
+    });
+
+    if (toInsert.length > 0) {
+      const { error: insErr } = await supabase.from("shipping_options").insert(toInsert);
+      if (insErr) return res.status(500).json({ error: insErr.message || "Erreur création options" });
+    }
+    if (toUpdate.length > 0) {
+      for (const row of toUpdate) {
+        const { id, ...rest } = row;
+        const { error: upErr } = await supabase.from("shipping_options").update(rest).eq("id", id);
+        if (upErr) return res.status(500).json({ error: upErr.message || "Erreur mise à jour option" });
+      }
+    }
+
+    const { data: finalRows, error: finErr } = await supabase
+      .from("shipping_options")
+      .select("id, shop_id, shipping_type, label, price_cents, is_active, created_at, updated_at")
+      .eq("shop_id", partnerId);
+    if (finErr) return res.status(500).json({ error: finErr.message || "Erreur lecture options" });
+
+    return res.json({ options: finalRows });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Aliases (LAB)
+app.get("/api/market/shipping-options/:partnerId", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const { data: shop, error: pErr } = await supabase
+      .from("partners_market")
+      .select("id, base_currency")
+      .eq("id", partnerId)
+      .maybeSingle();
+    if (pErr) return res.status(500).json({ error: pErr.message || "Erreur lecture partenaire" });
+
+    const { data: rows, error } = await supabase
+      .from("shipping_options")
+      .select("id, shop_id, shipping_type, label, price_cents, is_active, created_at, updated_at")
+      .eq("shop_id", partnerId);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture options livraison" });
+
+    const allowed = ["pickup", "standard", "express", "international"];
+    const defaults = {
+      pickup: { shipping_type: "pickup", label: "Retrait sur place", price_cents: 0, is_active: true },
+      standard: { shipping_type: "standard", label: "Livraison standard", price_cents: 0, is_active: false },
+      express: { shipping_type: "express", label: "Livraison express", price_cents: 0, is_active: false },
+      international: { shipping_type: "international", label: "Livraison internationale", price_cents: 0, is_active: false },
+    };
+
+    const byType = new Map();
+    (Array.isArray(rows) ? rows : []).forEach((r) => {
+      const t = String(r?.shipping_type || "").toLowerCase();
+      if (allowed.includes(t)) byType.set(t, r);
+    });
+
+    const options = allowed.map((t) => {
+      const r = byType.get(t);
+      if (r) return r;
+      const d = defaults[t];
+      return { id: null, shop_id: partnerId, ...d };
+    });
+
+    return res.json({ options, base_currency: shop?.base_currency || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.put("/api/market/shipping-options/:partnerId", bodyParser.json(), async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const allowed = new Set(["pickup", "standard", "express", "international"]);
+    const payload = Array.isArray(req.body) ? req.body : Array.isArray(req.body?.options) ? req.body.options : [];
+    if (!Array.isArray(payload)) return res.status(400).json({ error: "payload_invalid" });
+
+    const normalized = payload
+      .map((x) => ({
+        shipping_type: String(x?.shipping_type || "").toLowerCase().trim(),
+        label: typeof x?.label === "string" ? x.label.trim().slice(0, 120) : null,
+        price_cents: Math.max(parseInt(x?.price_cents, 10) || 0, 0),
+        is_active: x?.is_active === true,
+      }))
+      .filter((x) => allowed.has(x.shipping_type));
+
+    const { data: existing, error: exErr } = await supabase
+      .from("shipping_options")
+      .select("id, shipping_type")
+      .eq("shop_id", partnerId);
+    if (exErr) return res.status(500).json({ error: exErr.message || "Erreur lecture options" });
+    const idByType = new Map((existing || []).map((r) => [String(r.shipping_type).toLowerCase(), r.id]));
+
+    const toInsert = [];
+    const toUpdate = [];
+    normalized.forEach((n) => {
+      const id = idByType.get(n.shipping_type) || null;
+      const row = {
+        shop_id: partnerId,
+        shipping_type: n.shipping_type,
+        label: n.label || (n.shipping_type === "pickup" ? "Retrait sur place" : n.shipping_type === "standard" ? "Livraison standard" : n.shipping_type === "express" ? "Livraison express" : "Livraison internationale"),
+        price_cents: n.price_cents,
+        is_active: n.is_active === true,
+        updated_at: new Date().toISOString(),
+      };
+      if (id) {
+        toUpdate.push({ id, ...row });
+      } else {
+        toInsert.push({ ...row, created_at: new Date().toISOString() });
+      }
+    });
+
+    if (toInsert.length > 0) {
+      const { error: insErr } = await supabase.from("shipping_options").insert(toInsert);
+      if (insErr) return res.status(500).json({ error: insErr.message || "Erreur création options" });
+    }
+    if (toUpdate.length > 0) {
+      for (const row of toUpdate) {
+        const { id, ...rest } = row;
+        const { error: upErr } = await supabase.from("shipping_options").update(rest).eq("id", id);
+        if (upErr) return res.status(500).json({ error: upErr.message || "Erreur mise à jour option" });
+      }
+    }
+
+    const { data: finalRows, error: finErr } = await supabase
+      .from("shipping_options")
+      .select("id, shop_id, shipping_type, label, price_cents, is_active, created_at, updated_at")
+      .eq("shop_id", partnerId);
+    if (finErr) return res.status(500).json({ error: finErr.message || "Erreur lecture options" });
+
+    return res.json({ options: finalRows });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+console.log("[ROUTES] shipping-options registered top-level");
+
 // ============================================================
 // 🔔 Helper générique @tous (LOG ONLY pour LAB)
 // ============================================================
