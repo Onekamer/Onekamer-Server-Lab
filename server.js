@@ -3280,6 +3280,210 @@ app.post("/api/market/orders/:orderId/messages", bodyParser.json(), async (req, 
   }
 });
 
+app.post("/api/market/orders/:orderId/rating", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    const { rating, comment } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id, status, fulfillment_status")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+    if (String(order.customer_user_id) !== String(guard.userId)) return res.status(403).json({ error: "forbidden" });
+
+    const s = String(order.status || '').toLowerCase();
+    const f = String(order.fulfillment_status || '').toLowerCase();
+    if (!(s === 'paid' && f === 'completed')) return res.status(400).json({ error: "order_not_completed" });
+
+    const r = Math.max(Math.min(parseInt(rating, 10) || 0, 5), 0);
+    if (!(r >= 1 && r <= 5)) return res.status(400).json({ error: "rating_invalid" });
+    const text = typeof comment === 'string' ? comment.slice(0, 1000).trim() : null;
+
+    const { data: existing } = await supabase
+      .from("marketplace_partner_ratings")
+      .select("id")
+      .eq("order_id", orderId)
+      .maybeSingle();
+    if (existing?.id) return res.status(409).json({ error: "rating_exists" });
+
+    const payload = {
+      order_id: orderId,
+      partner_id: order.partner_id,
+      buyer_id: guard.userId,
+      rating: r,
+      comment: text,
+    };
+    const { data: ins, error: insErr } = await supabase
+      .from("marketplace_partner_ratings")
+      .insert(payload)
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message || "Erreur enregistrement avis" });
+
+    try {
+      const { data: partner } = await supabase
+        .from("partners_market")
+        .select("id, owner_user_id")
+        .eq("id", order.partner_id)
+        .maybeSingle();
+      const sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+      if (sellerId) {
+        const snippet = text ? (text.length > 80 ? text.slice(0, 77) + '…' : text) : `Note ${r}★`;
+        await sendSupabaseLightPush({
+          title: "Nouvel avis",
+          message: snippet,
+          targetUserIds: [sellerId],
+          data: { type: "market_partner_new_rating", orderId },
+          url: `/market/orders/${orderId}`,
+        });
+      }
+    } catch {}
+
+    return res.json({ success: true, ratingId: ins?.id || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/orders/:orderId/rating", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { orderId } = req.params;
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const { data: order, error: oErr } = await supabase
+      .from("partner_orders")
+      .select("id, partner_id, customer_user_id")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commande" });
+    if (!order) return res.status(404).json({ error: "order_not_found" });
+
+    let sellerId = null;
+    try {
+      const { data: partner } = await supabase
+        .from("partners_market")
+        .select("id, owner_user_id")
+        .eq("id", order.partner_id)
+        .maybeSingle();
+      sellerId = partner?.owner_user_id ? String(partner.owner_user_id) : null;
+    } catch {}
+
+    const isBuyer = String(order.customer_user_id) === String(guard.userId);
+    const isSeller = sellerId && String(sellerId) === String(guard.userId);
+    if (!(isBuyer || isSeller)) return res.status(403).json({ error: "forbidden" });
+
+    const { data: row, error: rErr } = await supabase
+      .from("marketplace_partner_ratings")
+      .select("id, rating, comment, created_at, is_edited")
+      .eq("order_id", orderId)
+      .maybeSingle();
+    if (rErr) return res.status(500).json({ error: rErr.message || "Erreur lecture avis" });
+
+    return res.json({ rating: row || null });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/:partnerId/ratings", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const { data: rows, error: rErr } = await supabase
+      .from("marketplace_partner_ratings")
+      .select("id, order_id, buyer_id, rating, comment, created_at")
+      .eq("partner_id", partnerId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (rErr) return res.status(500).json({ error: rErr.message || "Erreur lecture avis" });
+
+    const orderIds = (rows || []).map((x) => x.order_id).filter(Boolean);
+    let ordersById = {};
+    if (orderIds.length > 0) {
+      const { data: ords, error: oErr } = await supabase
+        .from("partner_orders")
+        .select("id, order_number, created_at")
+        .in("id", orderIds);
+      if (oErr) return res.status(500).json({ error: oErr.message || "Erreur lecture commandes" });
+      ordersById = (ords || []).reduce((acc, o) => { acc[String(o.id)] = o; return acc; }, {});
+    }
+
+    const list = (rows || []).map((x) => {
+      const o = ordersById[String(x.order_id)] || {};
+      const buyerAlias = x?.buyer_id ? `#${String(x.buyer_id).slice(0, 6)}` : null;
+      return {
+        id: x.id,
+        order_id: x.order_id,
+        order_number: o?.order_number || null,
+        buyer_alias: buyerAlias,
+        rating: x.rating,
+        comment: x.comment,
+        created_at: x.created_at,
+      };
+    });
+
+    return res.json({ ratings: list, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/partners/:partnerId/ratings/summary", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const auth = await requirePartnerOwner({ req, partnerId });
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
+    let avg = null;
+    let count = 0;
+    try {
+      const { data: row } = await supabase
+        .from("marketplace_partner_ratings_summary")
+        .select("partner_id, ratings_count, avg_rating")
+        .eq("partner_id", partnerId)
+        .maybeSingle();
+      if (row) {
+        count = Number(row.ratings_count || 0);
+        avg = row.avg_rating != null ? Number(row.avg_rating) : null;
+      }
+    } catch {}
+
+    if (avg == null) {
+      const { data: rows } = await supabase
+        .from("marketplace_partner_ratings")
+        .select("rating")
+        .eq("partner_id", partnerId);
+      const arr = Array.isArray(rows) ? rows.map((x) => Number(x.rating) || 0).filter((n) => n > 0) : [];
+      count = arr.length;
+      avg = count > 0 ? arr.reduce((a, b) => a + b, 0) / count : null;
+    }
+
+    const avgRounded = avg != null ? Math.round(avg * 10) / 10 : null;
+    return res.json({ avg: avgRounded, count });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, res) => {
   try {
     const { partnerId } = req.body || {};
