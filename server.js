@@ -68,6 +68,32 @@ function isDevOrigin(origin) {
   }
 }
 
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || isDevOrigin(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`🚫 CORS refusé pour l'origine : ${origin}`);
+      callback(new Error("Non autorisé par CORS"));
+    }
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "x-admin-token",
+  ],
+  credentials: true,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+console.log("✅ CORS actif pour :", allowedOrigins.join(", "));
+
 let autoCompleteJobRunning = false;
 async function autoCompleteDeliveredOrders() {
   if (autoCompleteJobRunning) return;
