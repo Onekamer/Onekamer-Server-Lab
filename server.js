@@ -3484,6 +3484,73 @@ app.get("/api/market/partners/:partnerId/ratings/summary", async (req, res) => {
   }
 });
 
+// Public lecture-only endpoints for marketplace display
+app.get("/api/market/public/partners/:partnerId/ratings/summary", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    let avg = null;
+    let count = 0;
+    try {
+      const { data: row } = await supabase
+        .from("marketplace_partner_ratings_summary")
+        .select("partner_id, ratings_count, avg_rating")
+        .eq("partner_id", partnerId)
+        .maybeSingle();
+      if (row) {
+        count = Number(row.ratings_count || 0);
+        avg = row.avg_rating != null ? Number(row.avg_rating) : null;
+      }
+    } catch {}
+
+    if (avg == null) {
+      const { data: rows } = await supabase
+        .from("marketplace_partner_ratings")
+        .select("rating")
+        .eq("partner_id", partnerId);
+      const arr = Array.isArray(rows) ? rows.map((x) => Number(x.rating) || 0).filter((n) => n > 0) : [];
+      count = arr.length;
+      avg = count > 0 ? arr.reduce((a, b) => a + b, 0) / count : null;
+    }
+
+    const avgRounded = avg != null ? Math.round(avg * 10) / 10 : null;
+    return res.json({ avg: avgRounded, count });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.get("/api/market/public/partners/:partnerId/ratings", async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const { data: rows, error: rErr } = await supabase
+      .from("marketplace_partner_ratings")
+      .select("id, buyer_id, rating, comment, created_at")
+      .eq("partner_id", partnerId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (rErr) return res.status(500).json({ error: rErr.message || "Erreur lecture avis" });
+
+    const list = (rows || []).map((x) => ({
+      id: x.id,
+      buyer_alias: x?.buyer_id ? `#${String(x.buyer_id).slice(0, 6)}` : null,
+      rating: x.rating,
+      comment: x.comment,
+      created_at: x.created_at,
+    }));
+
+    return res.json({ ratings: list, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/partner/connect/onboarding-link", bodyParser.json(), async (req, res) => {
   try {
     const { partnerId } = req.body || {};
