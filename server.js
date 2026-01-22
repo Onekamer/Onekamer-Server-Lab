@@ -715,12 +715,9 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
       return res.status(400).json({ error: "partner_connect_account_missing" });
     }
 
-    const applicationFeeAmount = Number(order.platform_fee_amount);
-    if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0) {
-      return res.status(400).json({ error: "order_fee_invalid" });
-    }
-    if (applicationFeeAmount > unitAmount) {
-      return res.status(400).json({ error: "order_fee_too_high" });
+    let applicationFeeAmount = Number(order.platform_fee_amount);
+    if (!Number.isFinite(applicationFeeAmount) || applicationFeeAmount < 0 || applicationFeeAmount > unitAmount) {
+      applicationFeeAmount = Math.max(Math.round((unitAmount * 1000) / 10000), 0);
     }
 
     const deliveryMode = String(order.delivery_mode || "").toLowerCase();
@@ -2522,11 +2519,10 @@ app.post("/api/market/orders", bodyParser.json(), async (req, res) => {
     });
 
     const fee = await getActiveFeeSettings(chargeCurrency);
-    if (!fee) return res.status(400).json({ error: "fee_settings_missing" });
-
-    const percentFee = Math.round((chargeTotal * Number(fee.percent_bps || 0)) / 10000);
-    const fixedFee = Number(fee.fixed_fee_amount || 0);
-    const platformFee = Math.max(percentFee + fixedFee, 0);
+    let platformFee = Math.max(Math.round((chargeTotal * 1000) / 10000), 0);
+    if (fee && Number(fee.percent_bps) === 1000 && Number(fee.fixed_fee_amount || 0) === 0) {
+      platformFee = Math.max(Math.round((chargeTotal * Number(fee.percent_bps)) / 10000), 0);
+    }
     const partnerAmount = Math.max(chargeTotal - platformFee, 0);
 
     const { data: inserted, error: oErr } = await supabase
