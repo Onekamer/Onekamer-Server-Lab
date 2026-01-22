@@ -36,6 +36,7 @@ const fetch = globalThis.fetch;
 // ✅ CONFIGURATION CORS — OneKamer Render + Horizon
 // =======================================================
 const app = express();
+app.set("etag", false);
 const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "supabase_light";
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement (fusion défaut + ENV)
 const defaultOrigins = [
@@ -280,6 +281,10 @@ app.get("/api/market/orders/:orderId/pay", async (req, res) => {
 
 app.get("/api/market/partners/:partnerId/shipping-options", async (req, res) => {
   try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+    res.set("Surrogate-Control", "no-store");
     const { partnerId } = req.params;
     if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
 
@@ -325,6 +330,10 @@ app.get("/api/market/partners/:partnerId/shipping-options", async (req, res) => 
 
 app.put("/api/market/partners/:partnerId/shipping-options", bodyParser.json(), async (req, res) => {
   try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+    res.set("Surrogate-Control", "no-store");
     const { partnerId } = req.params;
     if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
 
@@ -398,6 +407,10 @@ app.put("/api/market/partners/:partnerId/shipping-options", bodyParser.json(), a
 
 app.get("/api/market/shipping-options/:partnerId", async (req, res) => {
   try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+    res.set("Surrogate-Control", "no-store");
     const { partnerId } = req.params;
     if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
 
@@ -443,6 +456,10 @@ app.get("/api/market/shipping-options/:partnerId", async (req, res) => {
 
 app.put("/api/market/shipping-options/:partnerId", bodyParser.json(), async (req, res) => {
   try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+    res.set("Surrogate-Control", "no-store");
     const { partnerId } = req.params;
     if (!partnerId) return res.status(400).json({ error: "partnerId requis" });
 
