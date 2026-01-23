@@ -6781,6 +6781,342 @@ app.post("/notify-withdrawal", async (req, res) => {
 });
 
 // ============================================================
+// 6️⃣ OK COINS — Ledger & Withdrawals API (LAB)
+// ============================================================
+
+async function getUserOkcBalanceSnapshot(userId) {
+  const safeId = String(userId || "").trim();
+  if (!safeId) return { coins_balance: 0, points_total: 0, pending: 0, available: 0 };
+
+  const { data: bal } = await supabase
+    .from("okcoins_users_balance")
+    .select("coins_balance, points_total")
+    .eq("user_id", safeId)
+    .maybeSingle();
+
+  const coins_balance = Number(bal?.coins_balance || 0);
+  const points_total = Number(bal?.points_total || 0);
+
+  const { data: wdRows } = await supabase
+    .from("okcoins_withdrawals")
+    .select("amount, status")
+    .eq("user_id", safeId)
+    .in("status", ["requested", "processing"]);
+
+  const pending = Array.isArray(wdRows) ? wdRows.reduce((acc, r) => acc + Number(r?.amount || 0), 0) : 0;
+  const available = Math.max(0, coins_balance - pending);
+  return { coins_balance, points_total, pending, available };
+}
+
+// Solde disponible utilisateur
+app.get("/api/okcoins/balance", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const snap = await getUserOkcBalanceSnapshot(guard.userId);
+    return res.json(snap);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Ledger utilisateur (paginé)
+app.get("/api/okcoins/ledger", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 100);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    const { data: items, error, count } = await supabase
+      .from("okcoins_ledger")
+      .select("id, created_at, delta, kind, ref_type, ref_id, balance_after, metadata", { count: "exact" })
+      .eq("user_id", guard.userId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture ledger" });
+
+    return res.json({ items: items || [], total: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Mes retraits (paginé)
+app.get("/api/okcoins/withdrawals", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 100);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    const { data: items, error, count } = await supabase
+      .from("okcoins_withdrawals")
+      .select("id, created_at, updated_at, amount, status, balance_at_request, processed_at, refused_at, refused_reason, admin_notes", { count: "exact" })
+      .eq("user_id", guard.userId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture retraits" });
+
+    return res.json({ items: items || [], total: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Créer une demande de retrait (utilisateur)
+app.post("/api/okcoins/withdrawals/request", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const rawAmount = req.body?.amount;
+    const amount = Math.floor(Number(rawAmount));
+    if (!Number.isFinite(amount) || amount <= 0 || amount < 1000) {
+      return res.status(400).json({ error: "amount_invalid" });
+    }
+
+    const snap = await getUserOkcBalanceSnapshot(guard.userId);
+    if (amount > snap.available) {
+      return res.status(400).json({ error: "insufficient_available_balance" });
+    }
+
+    const nowIso = new Date().toISOString();
+    const payload = {
+      user_id: guard.userId,
+      amount,
+      status: "requested",
+      balance_at_request: snap.coins_balance,
+      updated_at: nowIso,
+    };
+
+    const { data: inserted, error: insErr } = await supabase
+      .from("okcoins_withdrawals")
+      .insert(payload)
+      .select("id")
+      .maybeSingle();
+    if (insErr) return res.status(500).json({ error: insErr.message || "Erreur création retrait" });
+
+    // Email + Push admin
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("username, email")
+        .eq("id", guard.userId)
+        .maybeSingle();
+
+      const username = prof?.username || "membre";
+      const email = prof?.email || "";
+      const withdrawalEmail = process.env.WITHDRAWAL_ALERT_EMAIL || "contact@onekamer.co";
+      const text = [
+        "Nouvelle demande de retrait OK COINS",
+        "",
+        `Utilisateur : ${username}`,
+        `Email : ${email}`,
+        `ID utilisateur : ${guard.userId}`,
+        `Montant demandé : ${amount.toLocaleString("fr-FR")} pièces`,
+        `Date : ${new Date().toLocaleString("fr-FR")}`,
+        "",
+        "— Notification automatique OneKamer.co",
+      ].join("\n");
+
+      await sendEmailViaBrevo({ to: withdrawalEmail, subject: "Nouvelle demande de retrait OK COINS", text });
+      await sendAdminWithdrawalPush(req, { username, amount });
+    } catch (_n) {}
+
+    await logEvent({ category: "withdrawal", action: "user.request", status: "success", userId: guard.userId, context: { amount, withdrawal_id: inserted?.id || null } });
+    return res.json({ id: inserted?.id || null, status: "requested", amount });
+  } catch (e) {
+    await logEvent({ category: "withdrawal", action: "user.request", status: "error", userId: null, context: { error: e?.message || String(e) } });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
+// 7️⃣ OK COINS — Admin Withdrawals (LAB)
+// ============================================================
+
+app.get("/api/admin/okcoins/withdrawals", async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const statusFilter = req.query.status ? String(req.query.status).trim().toLowerCase() : "";
+    const allowed = ["requested", "processing", "processed", "refused"];
+    const search = req.query.search ? String(req.query.search).trim() : "";
+    const limitRaw = req.query.limit;
+    const offsetRaw = req.query.offset;
+    const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 20, 1), 100);
+    const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
+
+    let ids = null;
+    if (search) {
+      const { data: profs } = await supabase
+        .from("profiles")
+        .select("id")
+        .or(`username.ilike.%${search}%,email.ilike.%${search}%`)
+        .limit(2000);
+      ids = Array.isArray(profs) ? profs.map((p) => p.id).filter(Boolean) : [];
+      if (ids.length === 0) return res.json({ items: [], total: 0, limit, offset });
+    }
+
+    let q = supabase
+      .from("okcoins_withdrawals")
+      .select("id, created_at, updated_at, user_id, amount, status, balance_at_request, processed_at, refused_at, refused_reason, admin_notes", { count: "exact" })
+      .order("created_at", { ascending: false });
+    if (statusFilter && allowed.includes(statusFilter)) q = q.eq("status", statusFilter);
+    if (ids) q = q.in("user_id", ids);
+
+    const { data: rows, error, count } = await q.range(offset, offset + limit - 1);
+    if (error) return res.status(500).json({ error: error.message || "Erreur lecture retraits" });
+
+    const userIds = Array.isArray(rows) ? Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean))) : [];
+    const profById = new Map();
+    if (userIds.length > 0) {
+      const { data: profs2 } = await supabase.from("profiles").select("id, username, email").in("id", userIds);
+      (profs2 || []).forEach((p) => profById.set(String(p.id), p));
+    }
+    const items = (rows || []).map((r) => {
+      const u = r.user_id ? profById.get(String(r.user_id)) || null : null;
+      return { ...r, username: u?.username || null, email: u?.email || null };
+    });
+
+    await logEvent({ category: "withdrawal", action: "admin.list", status: "success", userId: guard.userId, context: { status: statusFilter, search, count: items.length } });
+    return res.json({ items, total: typeof count === "number" ? count : null, limit, offset });
+  } catch (e) {
+    await logEvent({ category: "withdrawal", action: "admin.list", status: "error", userId: null, context: { error: e?.message || String(e) } });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/admin/okcoins/withdrawals/:id/accept", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "id_requis" });
+
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from("okcoins_withdrawals")
+      .update({ status: "processing", updated_at: nowIso })
+      .eq("id", id)
+      .eq("status", "requested");
+    if (error) return res.status(500).json({ error: error.message || "Erreur update" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/admin/okcoins/withdrawals/:id/refuse", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const { id } = req.params;
+    const reason = req.body?.reason ? String(req.body.reason) : null;
+    const notes = req.body?.notes ? String(req.body.notes) : null;
+    if (!id) return res.status(400).json({ error: "id_requis" });
+
+    const { data: wd } = await supabase
+      .from("okcoins_withdrawals")
+      .select("id, status")
+      .eq("id", id)
+      .maybeSingle();
+    if (!wd) return res.status(404).json({ error: "withdrawal_not_found" });
+    if (String(wd.status) === "processed") return res.status(400).json({ error: "already_processed" });
+
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase
+      .from("okcoins_withdrawals")
+      .update({ status: "refused", refused_at: nowIso, refused_reason: reason || null, admin_notes: notes || null, updated_at: nowIso })
+      .eq("id", id)
+      .neq("status", "processed");
+    if (error) return res.status(500).json({ error: error.message || "Erreur update" });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/admin/okcoins/withdrawals/:id/processed", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireAdminIsAdmin(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: "id_requis" });
+
+    const { data: wd, error: readErr } = await supabase
+      .from("okcoins_withdrawals")
+      .select("id, user_id, amount, status")
+      .eq("id", id)
+      .maybeSingle();
+    if (readErr) return res.status(500).json({ error: readErr.message || "Erreur lecture" });
+    if (!wd) return res.status(404).json({ error: "withdrawal_not_found" });
+    if (String(wd.status) !== "processing") return res.status(400).json({ error: "invalid_status" });
+
+    const userId = wd.user_id;
+    const amount = Number(wd.amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "amount_invalid" });
+
+    const { data: bal } = await supabase
+      .from("okcoins_users_balance")
+      .select("coins_balance")
+      .eq("user_id", userId)
+      .maybeSingle();
+    const current = Number(bal?.coins_balance || 0);
+    if (!Number.isFinite(current) || current < amount) return res.status(409).json({ error: "insufficient_balance" });
+    const next = current - amount;
+
+    const { data: upd, error: updErr } = await supabase
+      .from("okcoins_users_balance")
+      .update({ coins_balance: next })
+      .eq("user_id", userId)
+      .eq("coins_balance", current)
+      .gte("coins_balance", amount)
+      .select("coins_balance")
+      .maybeSingle();
+    if (updErr) return res.status(500).json({ error: updErr.message || "Erreur débit" });
+    if (!upd) return res.status(409).json({ error: "concurrent_update" });
+
+    const ledgerRow = {
+      user_id: userId,
+      delta: -amount,
+      kind: "withdrawal_processed",
+      ref_type: "withdrawal",
+      ref_id: id,
+      balance_after: next,
+      metadata: { processed_by: guard.userId },
+    };
+    const { error: ledErr } = await supabase.from("okcoins_ledger").insert(ledgerRow);
+    if (ledErr) {
+      await logEvent({ category: "withdrawal", action: "admin.process.ledger_error", status: "error", userId: guard.userId, context: { id, err: ledErr.message } });
+    }
+
+    const nowIso = new Date().toISOString();
+    const { error: setProcessedErr } = await supabase
+      .from("okcoins_withdrawals")
+      .update({ status: "processed", processed_at: nowIso, processed_by: guard.userId, updated_at: nowIso })
+      .eq("id", id)
+      .eq("status", "processing");
+    if (setProcessedErr) return res.status(500).json({ error: setProcessedErr.message || "Erreur maj statut" });
+
+    await logEvent({ category: "withdrawal", action: "admin.processed", status: "success", userId: guard.userId, context: { id, amount } });
+    return res.json({ success: true });
+  } catch (e) {
+    await logEvent({ category: "withdrawal", action: "admin.processed", status: "error", userId: null, context: { error: e?.message || String(e) } });
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// ============================================================
 // 8️⃣ Emails admin (LAB) - email_jobs
 // ============================================================
 
