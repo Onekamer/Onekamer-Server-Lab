@@ -6840,7 +6840,22 @@ app.get("/api/okcoins/ledger", async (req, res) => {
       .range(offset, offset + limit - 1);
     if (error) return res.status(500).json({ error: error.message || "Erreur lecture ledger" });
 
-    return res.json({ items: items || [], total: typeof count === "number" ? count : null, limit, offset });
+    const enriched = (items || []).map((it) => {
+      const md = it && typeof it.metadata === "object" && it.metadata !== null ? it.metadata : {};
+      const anonymous = Boolean(md.anonymous);
+      let direction = it.delta >= 0 ? "in" : "out";
+      let other_username = null;
+
+      if (String(it.kind) === "donation_in") {
+        other_username = anonymous ? "un membre" : (md.sender_username || md.from_username || null);
+      } else if (String(it.kind) === "donation_out") {
+        other_username = md.receiver_username || md.to_username || null;
+      }
+
+      return { ...it, direction, other_username, anonymous };
+    });
+
+    return res.json({ items: enriched, total: typeof count === "number" ? count : null, limit, offset });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "Erreur interne" });
   }
