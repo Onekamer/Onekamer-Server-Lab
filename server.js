@@ -38,6 +38,7 @@ const fetch = globalThis.fetch;
 const app = express();
 app.set("etag", false);
 const NOTIF_PROVIDER = process.env.NOTIFICATIONS_PROVIDER || "supabase_light";
+const ENABLE_INTEREST_MILESTONE = false;
 // 🔹 Récupération et gestion de plusieurs origines depuis l'environnement (fusion défaut + ENV)
 const defaultOrigins = [
   "https://onekamer.co",                        // Horizon (production)
@@ -67,6 +68,234 @@ function isDevOrigin(origin) {
     return false;
   }
 }
+
+// ============================================================
+// 👍 Intérêt Annonces / Événements (LAB)
+// - toggle via RPC Supabase
+// - notification auteur aux paliers de 5 (supabase_light)
+// ============================================================
+
+async function notifyInterestMilestone({ targetUserId, title, message, url = "/", data = {} }) {
+  try {
+    if (NOTIF_PROVIDER !== "supabase_light") return { success: false, reason: "provider_disabled" };
+
+    // Envoi WebPush (direct, basé sur push.js)
+    const { data: subs } = await supabase
+      .from("push_subscriptions")
+      .select("endpoint, p256dh, auth")
+      .eq("user_id", targetUserId);
+
+    const icon = "https://onekamer-media-cdn.b-cdn.net/logo/IMG_0885%202.PNG";
+    const payload = JSON.stringify({ title, body: message, icon, url, data });
+
+// Statut intérêt Événement
+app.get("/api/evenements/:eventId/interest/status", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    let count = 0;
+    let interested = false;
+    try {
+      const { data: evt } = await supabase
+        .from("evenements")
+        .select("id, interests_count")
+        .eq("id", eventId)
+        .maybeSingle();
+      count = Number(evt?.interests_count || 0);
+    } catch {}
+
+    try {
+      const { data: row } = await supabase
+        .from("evenements_interests")
+        .select("id")
+        .eq("event_id", eventId)
+        .eq("user_id", guard.userId)
+        .maybeSingle();
+      interested = !!row;
+    } catch {}
+
+    return res.json({ ok: true, interested, interests_count: count });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+    let sent = 0;
+    if (Array.isArray(subs)) {
+      for (const s of subs) {
+        try {
+          await webpush.sendNotification(
+            { endpoint: s.endpoint, expirationTime: null, keys: { p256dh: s.p256dh, auth: s.auth } },
+            payload
+          );
+          sent++;
+        } catch (err) {
+          console.error("webpush_interest_error", { status: err?.statusCode, code: err?.code, message: err?.message });
+        }
+      }
+    }
+
+    // Persistance dans notifications (best-effort)
+    try {
+      await supabase.rpc("create_notification", {
+        p_user_id: targetUserId,
+        p_sender_id: null,
+        p_type: data?.type || "systeme",
+        p_content_id: data?.contentId || null,
+        p_title: title,
+        p_message: message,
+        p_link: url || "/",
+      });
+    } catch (err) {
+      console.error("notification_interest_persist_error", { message: err?.message });
+    }
+
+    return { success: true, sent };
+  } catch (e) {
+    console.error("notifyInterestMilestone_exception", e?.message || e);
+    return { success: false, error: e?.message || String(e) };
+  }
+}
+
+// Toggle intérêt Annonce
+app.post("/api/annonces/:annonceId/interest", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { annonceId } = req.params;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    // Toggle via RPC
+    const { data: result, error: rpcErr } = await supabase.rpc("toggle_annonce_interest", {
+      p_user_id: guard.userId,
+      p_annonce_id: annonceId,
+    });
+    if (rpcErr) return res.status(500).json({ error: rpcErr.message || "rpc_error" });
+
+    let interested = !!result?.interested;
+    let count = Number(result?.count || 0);
+    const isMilestone = !!result?.is_milestone;
+
+    // Lecture auteur + titre pour notif
+    if (interested && isMilestone) {
+      try {
+        const { data: ann } = await supabase
+          .from("annonces")
+          .select("id, user_id, titre")
+          .eq("id", annonceId)
+          .maybeSingle();
+        const authorId = ann?.user_id || null;
+        const titleStr = ann?.titre || "Annonce";
+        if (authorId && ENABLE_INTEREST_MILESTONE) {
+          const l1 = "Annonces";
+          const l2 = titleStr;
+          const l3 = `${count} membres sont intéressés par votre annonce.`;
+          const msg = [l2, l3].filter(Boolean).join("\n");
+          await notifyInterestMilestone({
+            targetUserId: authorId,
+            title: l1,
+            message: msg,
+            url: `/annonces?annonceId=${encodeURIComponent(String(annonceId))}`,
+            data: { type: "annonces_interest_milestone", contentId: annonceId, count },
+          });
+        }
+      } catch {}
+    }
+
+    return res.json({ ok: true, interested, interests_count: count, is_milestone: isMilestone });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Statut intérêt Annonce
+app.get("/api/annonces/:annonceId/interest/status", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+    const { annonceId } = req.params;
+    if (!annonceId) return res.status(400).json({ error: "annonceId requis" });
+
+    let count = 0;
+    let interested = false;
+    try {
+      const { data: ann } = await supabase
+        .from("annonces")
+        .select("id, interests_count")
+        .eq("id", annonceId)
+        .maybeSingle();
+      count = Number(ann?.interests_count || 0);
+    } catch {}
+
+    try {
+      const { data: row } = await supabase
+        .from("annonces_interests")
+        .select("id")
+        .eq("annonce_id", annonceId)
+        .eq("user_id", guard.userId)
+        .maybeSingle();
+      interested = !!row;
+    } catch {}
+
+    return res.json({ ok: true, interested, interests_count: count });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+// Toggle intérêt Événement
+app.post("/api/evenements/:eventId/interest", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { eventId } = req.params;
+    if (!eventId) return res.status(400).json({ error: "eventId requis" });
+
+    const { data: result, error: rpcErr } = await supabase.rpc("toggle_evenement_interest", {
+      p_user_id: guard.userId,
+      p_event_id: eventId,
+    });
+    if (rpcErr) return res.status(500).json({ error: rpcErr.message || "rpc_error" });
+
+    let interested = !!result?.interested;
+    let count = Number(result?.count || 0);
+    const isMilestone = !!result?.is_milestone;
+
+    if (interested && isMilestone) {
+      try {
+        const { data: evt } = await supabase
+          .from("evenements")
+          .select("id, user_id, title")
+          .eq("id", eventId)
+          .maybeSingle();
+        const authorId = evt?.user_id || null;
+        const titleStr = evt?.title || "Événement";
+        if (authorId && ENABLE_INTEREST_MILESTONE) {
+          const l1 = "Evenements";
+          const l2 = titleStr;
+          const l3 = `${count} membres sont intéressés par votre événement.`;
+          const msg = [l2, l3].filter(Boolean).join("\n");
+          await notifyInterestMilestone({
+            targetUserId: authorId,
+            title: l1,
+            message: msg,
+            url: `/evenements?eventId=${encodeURIComponent(String(eventId))}`,
+            data: { type: "evenements_interest_milestone", contentId: eventId, count },
+          });
+        }
+      } catch {}
+    }
+
+    return res.json({ ok: true, interested, interests_count: count, is_milestone: isMilestone });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
 
 // CORS global sera activé plus bas (bloc existant), afin de conserver le comportement précédent.
 
