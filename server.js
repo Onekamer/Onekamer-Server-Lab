@@ -7800,6 +7800,60 @@ app.get("/influenceur/mes-stats", cors(), async (req, res) => {
   }
 });
 
+app.get("/api/echange/feed", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: posts, error: postsErr } = await supabase
+      .from("posts")
+      .select("*, profiles(id, username, avatar_url, created_at)")
+      .order("created_at", { ascending: false });
+    if (postsErr) return res.status(500).json({ error: postsErr.message });
+
+    const { data: audio, error: audioErr } = await supabase
+      .from("comments")
+      .select("*, author:profiles(id, username, avatar_url, created_at)")
+      .eq("content_type", "echange")
+      .order("created_at", { ascending: false });
+    if (audioErr) return res.status(500).json({ error: audioErr.message });
+
+    const items = [
+      ...((posts || []).map((p) => ({ ...p, author: p.profiles, feed_type: "post" }))),
+      ...((audio || []).map((a) => ({ ...a, feed_type: "audio_post" }))),
+    ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    let badgeMap = {};
+    try {
+      const ids = Array.from(new Set([
+        ...((posts || []).map((p) => p.user_id).filter(Boolean)),
+        ...((audio || []).map((a) => a.user_id).filter(Boolean)),
+      ].map(String)));
+
+      if (ids.length) {
+        const { data: ub } = await supabase
+          .from("user_badges")
+          .select("user_id, badges_communaute ( code, name, icon )")
+          .in("user_id", ids);
+        (ub || []).forEach((row) => {
+          const u = String(row.user_id);
+          const b = row?.badges_communaute;
+          if (!b?.code) return;
+          if (!badgeMap[u]) badgeMap[u] = [];
+          badgeMap[u].push({ code: b.code, name: b.name, icon: b.icon });
+        });
+      }
+    } catch (e) {
+      // ignore badge map errors
+    }
+
+    return res.json({ items, badgeMap });
+  } catch (e) {
+    console.error("GET /api/echange/feed error:", e);
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.get("/__version", (req, res) => {
   res.json({
     git: {
