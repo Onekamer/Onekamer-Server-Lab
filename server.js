@@ -1742,6 +1742,157 @@ app.get("/api/invites/my-stats", async (req, res) => {
   }
 });
 
+async function isEligibleForTrophy(userId, trophyKey) {
+  const k = String(trophyKey || "").trim().toLowerCase();
+  if (!userId || !k) return false;
+
+  if (k === "profile_complete") {
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("username, avatar_url, bio")
+        .eq("id", userId)
+        .maybeSingle();
+      const username = String(prof?.username || "").trim();
+      const avatar = String(prof?.avatar_url || "").trim();
+      const bio = String(prof?.bio || "").trim();
+      return username.length > 0 && avatar.length > 0 && bio.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_post") {
+    try {
+      const checks = [];
+      checks.push(supabase.from("annonces").select("id").eq("user_id", userId).limit(1));
+      checks.push(supabase.from("evenements").select("id").eq("user_id", userId).limit(1));
+      checks.push(supabase.from("faits_divers").select("id").eq("user_id", userId).limit(1));
+      const results = await Promise.allSettled(checks);
+      for (const r of results) {
+        if (r.status === "fulfilled") {
+          const rows = Array.isArray(r.value?.data) ? r.value.data : [];
+          if (rows.length > 0) return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_referral") {
+    try {
+      const { data: invites } = await supabase
+        .from("invites")
+        .select("code")
+        .eq("inviter_user_id", userId)
+        .is("revoked_at", null)
+        .limit(1000);
+      const codes = Array.isArray(invites) ? invites.map((i) => i?.code).filter(Boolean) : [];
+      if (codes.length === 0) return false;
+      const { data: ev } = await supabase
+        .from("invite_events")
+        .select("id")
+        .in("code", codes.slice(0, 1000))
+        .eq("event", "signup")
+        .limit(1);
+      return Array.isArray(ev) && ev.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+app.get("/api/trophies/my", async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const { data: allTrophies, error: tErr } = await supabase
+      .from("trophies")
+      .select("id, key, name, description, category, icon_url")
+      .order("created_at", { ascending: true });
+    if (tErr) return res.status(500).json({ error: tErr.message || "trophies_read_failed" });
+
+    const { data: mine, error: uErr } = await supabase
+      .from("user_trophies")
+      .select("trophy_key, unlocked_at")
+      .eq("user_id", guard.userId);
+    if (uErr) return res.status(500).json({ error: uErr.message || "user_trophies_read_failed" });
+
+    const byKey = new Map((Array.isArray(mine) ? mine : []).map((r) => [String(r.trophy_key), r]));
+    const items = (Array.isArray(allTrophies) ? allTrophies : []).map((t) => {
+      const k = String(t.key);
+      const got = byKey.get(k) || null;
+      return {
+        key: t.key,
+        name: t.name,
+        description: t.description,
+        category: t.category,
+        icon_url: t.icon_url || null,
+        unlocked: !!got,
+        unlocked_at: got?.unlocked_at || null,
+      };
+    });
+
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
+app.post("/api/trophies/award", bodyParser.json(), async (req, res) => {
+  try {
+    const guard = await requireUserJWT(req);
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    const rawKey = req.body?.trophy_key;
+    const trophyKey = String(rawKey || "").trim().toLowerCase();
+    if (!trophyKey) return res.status(400).json({ error: "missing_trophy_key" });
+
+    const { data: trophy, error: tErr } = await supabase
+      .from("trophies")
+      .select("id, key, name, description, category, icon_url")
+      .eq("key", trophyKey)
+      .maybeSingle();
+    if (tErr) return res.status(500).json({ error: tErr.message || "trophy_read_failed" });
+    if (!trophy) return res.status(404).json({ error: "trophy_not_found" });
+
+    const { data: existing } = await supabase
+      .from("user_trophies")
+      .select("id, trophy_key, unlocked_at")
+      .eq("user_id", guard.userId)
+      .eq("trophy_key", trophyKey)
+      .maybeSingle();
+    if (existing?.id) {
+      return res.json({ already_awarded: true, item: { trophy_key: existing.trophy_key, unlocked_at: existing.unlocked_at } });
+    }
+
+    const eligible = await isEligibleForTrophy(guard.userId, trophyKey);
+    if (!eligible) return res.status(400).json({ error: "not_eligible" });
+
+    const nowIso = new Date().toISOString();
+    const { data: ins, error: insErr } = await supabase
+      .from("user_trophies")
+      .insert({ user_id: guard.userId, trophy_id: trophy.id, trophy_key: trophyKey, unlocked_at: nowIso })
+      .select("id, trophy_key, unlocked_at")
+      .maybeSingle();
+    if (insErr) {
+      if (String(insErr?.message || "").toLowerCase().includes("duplicate")) {
+        return res.json({ already_awarded: true });
+      }
+      return res.status(500).json({ error: insErr.message || "award_failed" });
+    }
+
+    return res.json({ awarded: true, item: ins, trophy: { key: trophy.key, name: trophy.name, description: trophy.description, category: trophy.category, icon_url: trophy.icon_url || null } });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Erreur interne" });
+  }
+});
+
 app.post("/api/presence/heartbeat", async (req, res) => {
   try {
     const guard = await requireUserJWT(req);
