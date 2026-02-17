@@ -1803,13 +1803,105 @@ async function isEligibleForTrophy(userId, trophyKey) {
     }
   }
 
+  if (k === "first_comment") {
+    try {
+      const { data } = await supabase
+        .from("comments")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_mention") {
+    try {
+      const { data } = await supabase
+        .from("comments")
+        .select("id")
+        .eq("user_id", userId)
+        .ilike("content", "%@%")
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_group") {
+    try {
+      const { data } = await supabase
+        .from("groupes")
+        .select("id")
+        .eq("fondateur_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_annonce") {
+    try {
+      const { data } = await supabase
+        .from("annonces")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (k === "first_event") {
+    try {
+      const { data } = await supabase
+        .from("evenements")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   return false;
 }
+
+const DEFAULT_TROPHIES = [
+  { key: "profile_complete", name: "Profil complet", description: "Ajoutez un avatar, une bio et un pseudo.", category: "Profil", icon_url: null },
+  { key: "first_post", name: "Première publication", description: "Publiez une annonce, un événement ou un fait divers.", category: "Publication", icon_url: null },
+  { key: "first_referral", name: "Ambassadeur junior", description: "Faites inscrire un membre via votre lien.", category: "Communauté", icon_url: null },
+  { key: "first_comment", name: "Premier commentaire", description: "Publiez votre premier commentaire.", category: "Communauté", icon_url: null },
+  { key: "first_mention", name: "Première mention", description: "Mentionnez quelqu'un avec @pseudo.", category: "Communauté", icon_url: null },
+  { key: "first_group", name: "Créateur de groupe", description: "Créez votre premier groupe.", category: "Communauté", icon_url: null },
+  { key: "first_annonce", name: "Première annonce", description: "Publiez votre première annonce.", category: "Annonces", icon_url: null },
+  { key: "first_event", name: "Premier événement", description: "Organisez votre premier événement.", category: "Événements", icon_url: null },
+];
 
 app.get("/api/trophies/my", async (req, res) => {
   try {
     const guard = await requireUserJWT(req);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
+
+    // S'assurer que les trophées par défaut existent
+    const { data: existingRows, error: existErr } = await supabase
+      .from("trophies")
+      .select("id, key");
+    if (existErr) return res.status(500).json({ error: existErr.message || "trophies_read_failed" });
+    const existingKeys = new Set((Array.isArray(existingRows) ? existingRows : []).map((r) => String(r.key)));
+    const toInsert = DEFAULT_TROPHIES.filter((t) => !existingKeys.has(String(t.key)));
+    if (toInsert.length > 0) {
+      try {
+        await supabase.from("trophies").insert(toInsert);
+      } catch (e) {
+        // si conflit silencieux, on continue
+      }
+    }
 
     const { data: allTrophies, error: tErr } = await supabase
       .from("trophies")
