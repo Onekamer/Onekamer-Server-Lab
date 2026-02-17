@@ -1764,18 +1764,12 @@ async function isEligibleForTrophy(userId, trophyKey) {
 
   if (k === "first_post") {
     try {
-      const checks = [];
-      checks.push(supabase.from("annonces").select("id").eq("user_id", userId).limit(1));
-      checks.push(supabase.from("evenements").select("id").eq("user_id", userId).limit(1));
-      checks.push(supabase.from("faits_divers").select("id").eq("user_id", userId).limit(1));
-      const results = await Promise.allSettled(checks);
-      for (const r of results) {
-        if (r.status === "fulfilled") {
-          const rows = Array.isArray(r.value?.data) ? r.value.data : [];
-          if (rows.length > 0) return true;
-        }
-      }
-      return false;
+      const { data } = await supabase
+        .from("posts")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      return Array.isArray(data) && data.length > 0;
     } catch {
       return false;
     }
@@ -1874,7 +1868,7 @@ async function isEligibleForTrophy(userId, trophyKey) {
 
 const DEFAULT_TROPHIES = [
   { key: "profile_complete", name: "Profil complet", description: "Ajoutez un avatar, une bio et un pseudo.", category: "Profil", icon_url: null },
-  { key: "first_post", name: "Première publication", description: "Publiez une annonce, un événement ou un fait divers.", category: "Publication", icon_url: null },
+  { key: "first_post", name: "Première publication", description: "Publiez votre premier post.", category: "Publication", icon_url: null },
   { key: "first_referral", name: "Ambassadeur junior", description: "Faites inscrire un membre via votre lien.", category: "Communauté", icon_url: null },
   { key: "first_comment", name: "Premier commentaire", description: "Publiez votre premier commentaire.", category: "Communauté", icon_url: null },
   { key: "first_mention", name: "Première mention", description: "Mentionnez quelqu'un avec @pseudo.", category: "Communauté", icon_url: null },
