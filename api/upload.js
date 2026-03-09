@@ -5,10 +5,19 @@ import { createClient } from "@supabase/supabase-js";
 import fixAnnoncesImages from "./fix-annonces-images.js";
 import fixPartenaireImages from "./fix-partenaire-images.js";
 import fixEvenementsImages from "./fix-evenements-images.js";
+import fs from "fs";
 
 
 const router = express.Router();
-const upload = multer();
+const storage = multer.diskStorage({
+  destination: "/tmp",
+  filename: (req, file, cb) => {
+    const orig = (file.originalname || "upload").replace(/\s+/g, "_");
+    const unique = `${Date.now()}_${Math.random().toString(36).slice(2)}_${orig}`;
+    cb(null, unique);
+  },
+});
+const upload = multer({ storage });
 
 // ✅ Initialisation Supabase (pour synchroniser les fichiers)
 const supabase = createClient(
@@ -19,6 +28,7 @@ const supabase = createClient(
 // 🟢 Route universelle d’upload vers BunnyCDN (+ sync Supabase)
 router.post("/upload", upload.single("file"), async (req, res) => {
   try {
+    const startedAt = Date.now();
     // ✅ Compatibilité étendue avec anciens et nouveaux champs
     const folder = req.body.folder || req.body.type || "misc";
     const userId = req.body.user_id || req.body.userId || req.body.recordId;
@@ -94,7 +104,10 @@ console.log(`
 =============================================
 `);
 
-    // 🚀 Upload vers BunnyCDN
+    // 🚀 Upload vers BunnyCDN (stream depuis /tmp avec Content-Length)
+    const tmpPath = file.path;
+    const stat = await fs.promises.stat(tmpPath);
+    const stream = fs.createReadStream(tmpPath);
     const response = await fetch(
       `https://storage.bunnycdn.com/${process.env.BUNNY_STORAGE_ZONE}/${uploadPath}`,
       {
@@ -102,22 +115,24 @@ console.log(`
         headers: {
           AccessKey: process.env.BUNNY_ACCESS_KEY,
           "Content-Type": mimeType,
+          "Content-Length": String(stat.size),
         },
-        body: file.buffer,
+        duplex: "half",
+        body: stream,
       }
     );
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("❌ Erreur BunnyCDN:", errorText);
+      console.error("❌ Erreur BunnyCDN:", { status: response.status, errorText, uploadPath, sizeBytes: stat.size });
       throw new Error(`Échec de l’upload sur BunnyCDN (${response.status})`);
     }
 
     // 🌍 URL finale (CDN public)
     let cdnUrl = `${process.env.BUNNY_CDN_URL}/${uploadPath}`;
 
-   // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres"
-if (folder === "rencontres") {
+   // 🪄 Synchronisation automatique dans Supabase uniquement pour "rencontres" et seulement pour les images
+if (folder === "rencontres" && isImage) {
   try {
     // ✅ Structure finale dans Supabase :
     // Bucket: rencontres
@@ -137,7 +152,7 @@ if (folder === "rencontres") {
 
     const { error: supabaseError } = await supabase.storage
       .from("rencontres")
-      .upload(supabasePath, file.buffer, {
+      .upload(supabasePath, await fs.promises.readFile(tmpPath), {
         contentType: mimeType,
         upsert: true,
       });
@@ -168,19 +183,25 @@ if (!process.env.BUNNY_CDN_URL || !cdnUrl.startsWith("http")) {
   cdnUrl = `https://onekamer-media-cdn.b-cdn.net/${uploadPath}`;
 }
 
-// 📦 Log clair
+// 📦 Log clair avec durée totale
+const durationMs = Date.now() - startedAt;
 console.log(`
 ✅ Upload finalisé :
 🌍 URL publique : ${cdnUrl}
 📁 Dossier interne : ${uploadPath}
+📏 Taille (octets) : ${stat.size}
+⏱️ Durée totale : ${durationMs} ms
 `);
 
+await fs.promises.unlink(tmpPath).catch(() => {});
 return res.status(200).json({
   success: true,
   url: cdnUrl,          // 👈 toujours l'URL complète
   full_url: cdnUrl,     // 👈 alias pour compatibilité ancienne
   path: uploadPath,     // 👈 utile pour debug uniquement
   mimeType,
+  sizeBytes: stat.size,
+  durationMs,
   message: `✅ Upload réussi vers ${cdnUrl}`,
 });
   
@@ -204,6 +225,7 @@ try {
     
   } catch (err) {
     console.error("❌ Erreur upload:", err.message);
+    try { if (req?.file?.path) { await fs.promises.unlink(req.file.path); } } catch {}
     return res.status(500).json({
       success: false,
       error: err.message,

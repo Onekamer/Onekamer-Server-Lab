@@ -22,6 +22,7 @@ import { createClient } from "@supabase/supabase-js";
 import { AccessToken } from "livekit-server-sdk";
 import nodemailer from "nodemailer";
 import webpush from "web-push";
+import http from "http";
 import uploadRoute from "./api/upload.js";
 import partenaireDefaultsRoute from "./api/fix-partenaire-images.js";
 import fixAnnoncesImagesRoute from "./api/fix-annonces-images.js";
@@ -8186,6 +8187,12 @@ setInterval(runAutoFix, 15 * 60 * 1000);
 // ============================================================
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Serveur OneKamer actif sur port ${PORT}`);
+// Crée explicitement le serveur HTTP pour ajuster les timeouts (uploads volumineux)
+const server = http.createServer(app);
+// Étendre les délais pour permettre des PUT de grandes vidéos sans coupure
+try { server.requestTimeout = 600000; } catch {}
+try { server.headersTimeout = 600000; } catch {}
+try { server.keepAliveTimeout = 90000; } catch {}
+server.listen(PORT, () => {
+  console.log(`🚀 Serveur OneKamer actif sur port ${PORT} (timeouts étendus)`);
 });
