@@ -4589,6 +4589,10 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
     if (event.type === "payment_intent.succeeded") {
       const pi = event.data.object;
       const md = (pi && pi.metadata) ? pi.metadata : {};
+      const type = typeof md.type === "string" ? md.type : null;
+      if (type !== "okcoins_pack") {
+        return res.json({ received: true });
+      }
       const userId = md.userId ? String(md.userId) : null;
       const packId = md.packId ? parseInt(md.packId, 10) : null;
 
@@ -5479,7 +5483,7 @@ app.post("/api/okcoins/intent", bodyParser.json(), async (req, res) => {
       amount,
       currency: "eur",
       automatic_payment_methods: { enabled: true },
-      metadata: { userId: guard.userId, packId: String(packId) },
+      metadata: { type: "okcoins_pack", userId: guard.userId, packId: String(packId) },
     });
 
     return res.json({ clientSecret: intent.client_secret });
